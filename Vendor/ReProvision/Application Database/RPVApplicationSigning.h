@@ -57,6 +57,9 @@
 
 - (BOOL)removeApplicationWithBundleIdentifier:(NSString *)bundleIdentifier;
 
+/// v2.1.39：「确认卸载」弹窗用户选「取消」时清理本次重签临时目录（保留目标 app）。
+- (void)cleanupTemporaryDirectoryForBundleIdentifier:(NSString *)bundleIdentifier;
+
 /**
  Set by the app delegate to route provisioning-profile registration through the
  root daemon over XPC. Required on RootHide (the app is sandboxed and cannot
