@@ -26,8 +26,8 @@ OUTPUT = os.path.join(PROJECT_ROOT, "RePro.xcodeproj", "project.pbxproj")
 # ---------------------------------------------------------------------------
 TARGET_NAME = "ReSign"
 BUNDLE_ID = "cn.analy.resign"
-MARKETING_VERSION = "2.1.39"
-CURRENT_PROJECT_VERSION = "61"
+MARKETING_VERSION = "2.1.40"
+CURRENT_PROJECT_VERSION = "62"
 DEPLOYMENT_TARGET = "16.0"
 BRIDGING_HEADER = "App/Sources/Bridge/ReSign-Bridging-Header.h"
 ENTITLEMENTS = "Resources/entitlements-base.plist"
