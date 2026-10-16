@@ -1,0 +1,27 @@
+# Xcode
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+DerivedData/
+build/
+*.ipa
+
+# CocoaPods
+Pods/
+RePro.xcworkspace/
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 临时文件
+*.tmp
+*.bak
+*~
+.tmp/
+
+# 项目记忆（v1.1.157：不再进仓库，本地保留）
+.workbuddy/
