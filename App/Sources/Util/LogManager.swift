@@ -64,7 +64,7 @@ nonisolated func DaemonLogDefaultPath() -> String {
 }
 
 /// daemon 日志文件大小上限（2 MB），超出后截断重建（见 daemonLogWrite 轮转逻辑）
-private let maxDaemonLogSize: Int64 = 2 * 1024 * 1024
+nonisolated private let maxDaemonLogSize: Int64 = 2 * 1024 * 1024
 /// 轮转检查计数器（daemonLogWrite 每 ~100 行 stat 一次文件大小；Swift 函数内不允许 static 局部变量，用文件级全局）
 /// 🔴 Swift 6 迁移：仅由 gDaemonLogLock 保护下访问 → nonisolated(unsafe) 豁免。
 nonisolated(unsafe) private var daemonLogWriteCount: Int = 0
