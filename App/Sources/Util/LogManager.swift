@@ -17,7 +17,7 @@ nonisolated(unsafe) private var gDaemonLogPath: String? = nil
 nonisolated(unsafe) private var gDaemonLogLock = os_unfair_lock()
 
 /// 开启 daemon 日志转发（后续所有 LogManager 日志同步写入该文件）
-func DaemonLogStart(_ path: String) {
+nonisolated func DaemonLogStart(_ path: String) {
     os_unfair_lock_lock(&gDaemonLogLock)
     defer { os_unfair_lock_unlock(&gDaemonLogLock) }
     gDaemonLogPath = path
@@ -28,7 +28,7 @@ func DaemonLogStart(_ path: String) {
 }
 
 /// 关闭 daemon 日志转发
-func DaemonLogStop() {
+nonisolated func DaemonLogStop() {
     os_unfair_lock_lock(&gDaemonLogLock)
     defer { os_unfair_lock_unlock(&gDaemonLogLock) }
     if let f = gDaemonLogFile { fclose(f) }
@@ -37,7 +37,7 @@ func DaemonLogStop() {
 }
 
 /// 清空 daemon 日志（fopen("w")截断，不依赖权限）
-func DaemonLogClear(_ path: String) {
+nonisolated func DaemonLogClear(_ path: String) {
     os_unfair_lock_lock(&gDaemonLogLock)
     defer { os_unfair_lock_unlock(&gDaemonLogLock) }
     if let f = gDaemonLogFile { fclose(f); gDaemonLogFile = nil }
@@ -45,7 +45,7 @@ func DaemonLogClear(_ path: String) {
 }
 
 /// 获取 daemon 日志文件大小
-func DaemonLogSize(_ path: String) -> String {
+nonisolated func DaemonLogSize(_ path: String) -> String {
     guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
           let size = attrs[.size] as? Int64 else { return "—" }
     if size < 1024 { return "\(size) B" }
@@ -59,7 +59,7 @@ func DaemonLogSize(_ path: String) -> String {
 /// 用户 SSH/爱思看不到），而 /var/mobile/Library/Resign 是豁免 overlay 的共享 IPC 目录，
 /// App(mobile) 与 signingd 都能写、用户也能在真实 rootfs 看到。signingd 的 s_open_log
 /// v1.1.186 首选同一路径，App 与 daemon 日志合流到一个文件（各自带时间戳前缀）。
-func DaemonLogDefaultPath() -> String {
+nonisolated func DaemonLogDefaultPath() -> String {
     return "/var/mobile/Library/Resign/reprorefresh_at.log"
 }
 
@@ -71,7 +71,7 @@ nonisolated(unsafe) private var daemonLogWriteCount: Int = 0
 
 /// 同步写入一行到 daemon 日志（在 LogManager.append 中调用）
 /// 内置 2 MB 轮转：超出后截断保留后半段，避免长期运行撑满磁盘
-private func daemonLogWrite(ts: String, source: String, message: String) {
+private nonisolated func daemonLogWrite(ts: String, source: String, message: String) {
     os_unfair_lock_lock(&gDaemonLogLock)
     defer { os_unfair_lock_unlock(&gDaemonLogLock) }
     guard let f = gDaemonLogFile else { return }
@@ -113,7 +113,7 @@ class LogManager: ObservableObject {
     @Published private(set) var logs: [LogEntry] = []
     private let maxLogEntries = 5000
 
-    private init() {}
+    nonisolated private init() {}
 
     // MARK: 初始化
     func initialize() {

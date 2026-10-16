@@ -315,7 +315,7 @@ final class SigningViewModel: ObservableObject {
     // MARK: - 签名前自动撤销证书
 
     /// 委托给 BridgeClient.shared.autoRevokeBeforeSigning（共享逻辑含去重、开关、日志）。
-    private func autoRevokeBeforeSigning(completion: @escaping (Error?) -> Void) {
+    private func autoRevokeBeforeSigning(completion: @escaping @MainActor (Error?) -> Void) {
         client.autoRevokeBeforeSigning(completion: completion)
     }
 
