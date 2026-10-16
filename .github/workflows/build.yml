@@ -1,0 +1,522 @@
+name: Build ReSign
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release tag name（手动触发专用；留空则用分支名）'
+        required: false
+        default: ''
+
+# 🔴 v2.1.0：同一 tag force push 会堆积多个排队 run（互相干扰、浪费名额）。
+# concurrency：同 ref 只保留最新，旧 run 自动取消。
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  issues: write # 诊断步骤用：失败时把构建错误发成 issue（CI 日志下载被本机网络 SNI 拦截时的取证通道）
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 🔴 v2.1.35→v2.1.39：Xcode 27（Swift 6.4 编译器）编译。
+      # 切 Xcode 27（iOS 27 SDK）编译后自动适配最新 SDK 特性（部署目标仍 16.0）。
+      - name: Set up Xcode 27
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest
+
+      - name: Install dependencies
+        run: |
+          set -e
+          echo "Installing ldid and dpkg..."
+          brew install ldid dpkg 2>/dev/null || { echo "brew install failed, trying again..."; brew install ldid dpkg; }
+          echo "ldid: $(command -v ldid || echo MISSING)"
+          echo "dpkg-deb: $(command -v dpkg-deb || echo MISSING)"
+          if ! command -v dpkg-deb &>/dev/null; then
+            echo "dpkg-deb not found, installing via brew..."
+            brew install dpkg
+          fi
+
+      # App 用 OpenSSL 1.1.x（CSR/签名兼容性），zsign 用 3.x（需要 provider API）
+      - name: Cache OpenSSL 1.1.x for App (iOS arm64)
+        id: openssl11-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/openssl-ios
+          key: openssl-ios-1.1.1w-${{ runner.os }}
+
+      - name: Build OpenSSL 1.1.x for iOS arm64 (App)
+        if: steps.openssl11-cache.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          # OpenSSL 1.1.1w — 最后一个 1.1.x LTS，CSR/签名需要此版本。
+          # 3.x 静态链接 default provider 不自动激活导致 CSR 生成失败。
+          rm -rf /tmp/openssl-ios-src
+          git clone --depth 1 --branch OpenSSL_1_1_1w https://github.com/openssl/openssl.git /tmp/openssl-ios-src
+          cd /tmp/openssl-ios-src
+          export CROSS_TOP=$(xcrun --sdk iphoneos --show-sdk-platform-path)/Developer
+          export CROSS_SDK=$(basename $(xcrun --sdk iphoneos --show-sdk-path))
+          ./Configure ios64-xcrun no-shared no-tests no-asm --prefix=/tmp/openssl-ios > /dev/null
+          make -j$(sysctl -n hw.ncpu) > /dev/null 2>&1
+          make install_sw > /dev/null 2>&1
+          ls -la /tmp/openssl-ios/lib/
+
+      - name: Cache OpenSSL 3.x for zsign (iOS arm64)
+        id: openssl3-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/openssl3-ios
+          key: openssl3-ios-3.4.1-${{ runner.os }}
+
+      - name: Build OpenSSL 3.x for iOS arm64 (zsign)
+        if: steps.openssl3-cache.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          # zsign 需要 OpenSSL 3.x 的 OSSL_PROVIDER_load 等 API。
+          OPENSSL_VER=3.4.1
+          rm -rf /tmp/openssl3-ios-src
+          git clone --depth 1 --branch "openssl-${OPENSSL_VER}" https://github.com/openssl/openssl.git /tmp/openssl3-ios-src
+          cd /tmp/openssl3-ios-src
+          export CROSS_TOP=$(xcrun --sdk iphoneos --show-sdk-platform-path)/Developer
+          export CROSS_SDK=$(basename $(xcrun --sdk iphoneos --show-sdk-path))
+          ./Configure ios64-xcrun no-shared no-tests no-asm --prefix=/tmp/openssl3-ios > /dev/null
+          make -j$(sysctl -n hw.ncpu) > /dev/null 2>&1
+          make install_sw > /dev/null 2>&1
+          ls -la /tmp/openssl3-ios/lib/
+
+      - name: Build iOS App (ReSign)
+        run: |
+          set -uo pipefail
+
+          # 本项目无第三方依赖，直接用 xcodeproj 构建（无 CocoaPods / SwiftPM）
+          echo "=== 开始 xcodebuild ==="
+          xcodebuild -project RePro.xcodeproj \
+            -scheme ReSign \
+            -configuration Release \
+            -sdk iphoneos \
+            -arch arm64 \
+            CODE_SIGNING_ALLOWED=NO \
+            -derivedDataPath build \
+            > build.log 2>&1 || {
+              echo "=== xcodebuild 失败，完整日志（前 200 行 + 错误行）： ==="
+              grep -nE "error:|fatal error:|Undefined symbol|does not contain a scheme|BUILD FAILED" build.log | head -50
+              echo "=== 日志尾部 80 行 ==="
+              tail -80 build.log
+              exit 1
+            }
+
+          echo "=== xcodebuild 成功，最后 30 行： ==="
+          tail -30 build.log
+
+          # 检查构建产物
+          APP_PATH=$(find build -name "ReSign.app" -type d | head -1)
+          if [ ! -d "$APP_PATH" ]; then
+            echo "error: ReSign.app not found"
+            echo "=== 构建日志最后 120 行 ==="
+            tail -120 build.log
+            exit 1
+          fi
+          echo "Built app at $APP_PATH"
+
+      - name: Build root helper (repro-helper)
+        # 本项目已经没有常驻守护进程。需要 root 的两件事（跨沙箱复制 IPA、
+        # 把描述文件写进 /var/Managed Preferences/mobile）交给一个 setuid root
+        # 的一次性小工具 repro-helper，由 App 用 posix_spawn 按需拉起。
+        # 它只依赖 Foundation + CommonCrypto（在 libSystem 里），一条 clang 就够。
+        run: |
+          set -e
+          mkdir -p build
+
+          xcrun -sdk iphoneos clang \
+            -x objective-c -fobjc-arc \
+            -arch arm64 -miphoneos-version-min=15.0 \
+            -O2 \
+            -framework Foundation \
+            -o build/repro-helper \
+            Helper/repro-helper.m 2>&1 | tee helper_build.log
+
+          if [ ! -f build/repro-helper ]; then
+            echo "error: repro-helper build failed"
+            cat helper_build.log
+            exit 1
+          fi
+
+          file build/repro-helper
+          chmod +x build/repro-helper
+          echo "root helper built successfully"
+
+      # 🔀 v2.1.29：repro-profiledaemon 是 RootHide 专属组件（jbroot namespace 下
+      #    App 写 /var/Managed Preferences/mobile 会落进 overlay 假目录，必须由
+      #    rootfs 上的 LaunchDaemon 代写）。rootless/rootful 没有 namespace 隔离、
+      #    根本不装它，其源码与打包已随 roothide 一并迁到独立的 `roothide` 分支。
+      #    main 分支不再编译该二进制。
+
+      - name: Build signing daemon (repro-signingd)
+        # 🆕 v2.1.0：signingd 直接集成交付满签名管线（原版 ReProvision 架构）。
+        # 不再依赖唤醒 App → 不存在「等 notify 卡死」的脆弱环节。
+        # 编译包含 Vendor 下全部签名源码 + libplist + OpenSSL 1.1.x（CSR 生成）。
+        run: |
+          set -e
+          mkdir -p build
+
+          OPENSSL_DIR=/tmp/openssl-ios
+
+          # bash 数组（路径含空格时避免被拆成分隔符）
+          # 🔴 v2.1.0 精简：daemon 凭据已缓存，不需要完整登录流。
+          # RPVLoginImpl(SRP+corecrypto) / RPVLoginFallbackImpl(AuthKit UI) /
+          # RPVAuthentication(门面) / RPVAccountChecker(检查) / ccsrp(SRP加密)
+          # 均排除。Anisette 由 daemon 内直接 dlopen AuthKit 生成。
+          SRC_OBJC=(
+            Helper/repro-signingd.m
+            Vendor/ReProvision/libProvision/EEBackend.m
+            "Vendor/ReProvision/libProvision/Provisioning/EEProvisioning.mm"
+            "Vendor/ReProvision/libProvision/Apple Services/EEAppleServices.m"
+            "Vendor/ReProvision/libProvision/Apple Services/NSData+GZIP.m"
+            "Vendor/ReProvision/libProvision/Signing/RZSignRunner.m"
+            Vendor/ReProvision/Resources/RPVResources.m
+            Vendor/ReProvision/libProvision/SAMKeychain/SAMKeychain.m
+            Vendor/ReProvision/libProvision/SAMKeychain/SAMKeychain/SAMKeychainQuery.m
+            "Vendor/ReProvision/Application Database/RPVApplication.m"
+            Helper/SSZipArchiveStub.m
+            Helper/DaemonStubs.m
+          )
+
+          SRC_LIBPLIST=(
+            Vendor/ReProvision/libProvision/libplist/base64.c
+            Vendor/ReProvision/libProvision/libplist/bplist.c
+            Vendor/ReProvision/libProvision/libplist/bytearray.c
+            Vendor/ReProvision/libProvision/libplist/hashtable.c
+            Vendor/ReProvision/libProvision/libplist/libcnary/iterator.c
+            Vendor/ReProvision/libProvision/libplist/libcnary/list.c
+            Vendor/ReProvision/libProvision/libplist/libcnary/node.c
+            Vendor/ReProvision/libProvision/libplist/libcnary/node_iterator.c
+            Vendor/ReProvision/libProvision/libplist/libcnary/node_list.c
+            Vendor/ReProvision/libProvision/libplist/plist.c
+            Vendor/ReProvision/libProvision/libplist/ptrarray.c
+            Vendor/ReProvision/libProvision/libplist/time64.c
+            Vendor/ReProvision/libProvision/libplist/xplist.c
+            Vendor/ReProvision/libProvision/libplist/Array.cpp
+            Vendor/ReProvision/libProvision/libplist/Boolean.cpp
+            Vendor/ReProvision/libProvision/libplist/Data.cpp
+            Vendor/ReProvision/libProvision/libplist/Date.cpp
+            Vendor/ReProvision/libProvision/libplist/Dictionary.cpp
+            Vendor/ReProvision/libProvision/libplist/Integer.cpp
+            Vendor/ReProvision/libProvision/libplist/Key.cpp
+            Vendor/ReProvision/libProvision/libplist/Node.cpp
+            Vendor/ReProvision/libProvision/libplist/Real.cpp
+            Vendor/ReProvision/libProvision/libplist/String.cpp
+            Vendor/ReProvision/libProvision/libplist/Structure.cpp
+            Vendor/ReProvision/libProvision/libplist/Uid.cpp
+          )
+
+          # 🔴 v2.1.0 fix10: ChOma 源码（EEBackend 的 fat_*/csd_* 签名描述符号）
+          SRC_CHOMA=(
+            Vendor/ChOma/arm64.c
+            Vendor/ChOma/Base64.c
+            Vendor/ChOma/BufferedStream.c
+            Vendor/ChOma/CodeDirectory.c
+            Vendor/ChOma/CSBlob.c
+            Vendor/ChOma/DER.c
+            Vendor/ChOma/DyldSharedCache.c
+            Vendor/ChOma/Entitlements.c
+            Vendor/ChOma/Fat.c
+            Vendor/ChOma/FileStream.c
+            Vendor/ChOma/Host.c
+            Vendor/ChOma/MachO.c
+            Vendor/ChOma/MachOLoadCommand.c
+            Vendor/ChOma/MemoryStream.c
+            Vendor/ChOma/PatchFinder.c
+            Vendor/ChOma/PatchFinder_arm64.c
+            Vendor/ChOma/Util.c
+          )
+
+          INC_DIRS=(
+            -IVendor/ReProvision
+            -IVendor/ReProvision/libProvision
+            "-IVendor/ReProvision/libProvision/Provisioning"
+            "-IVendor/ReProvision/libProvision/Apple Services"
+            "-IVendor/ReProvision/libProvision/Signing"
+            -IVendor/ReProvision/libProvision/SAMKeychain
+            -IVendor/ReProvision/libProvision/SAMKeychain/SAMKeychain
+            -IVendor/ReProvision/libProvision/libplist/include
+            "-IVendor/ReProvision/libProvision/CoreCrypt"
+            -IVendor/ReProvision/corecrypto
+            "-IVendor/ReProvision/Application Database"
+            -IVendor/ReProvision/Resources
+            -IVendor/ReProvision/libProvision/SSZipArchive
+            -IVendor/ReProvision/Support
+            -IVendor/ChOma
+            -IHelper
+            "-I${OPENSSL_DIR}/include"
+          )
+
+          # 🔴 不设 -x objective-c：.m → ObjC, .mm → ObjC++, .c → C, .cpp → C++
+          # EEProvisioning.mm 用 <cstdio> 等 C++ 标准头，必须走 ObjC++ 编译。
+          xcrun -sdk iphoneos clang \
+            -fobjc-arc \
+            -arch arm64 -miphoneos-version-min=15.0 \
+            -O2 \
+            -framework Foundation -framework CoreFoundation -framework Security -framework MobileCoreServices \
+            "${INC_DIRS[@]}" \
+            "-L${OPENSSL_DIR}/lib" -lssl -lcrypto -lc++ -lobjc \
+            -o build/repro-signingd \
+            "${SRC_OBJC[@]}" \
+            "${SRC_LIBPLIST[@]}" \
+            "${SRC_CHOMA[@]}" \
+            2>&1 | tee signingd_build.log
+
+          if [ ! -f build/repro-signingd ]; then
+            echo "error: repro-signingd build failed"
+            cat signingd_build.log
+            exit 1
+          fi
+
+          file build/repro-signingd
+          chmod +x build/repro-signingd
+          echo "signing daemon built successfully (v2.1.0: self-contained signing pipeline)"
+
+      - name: Cross-compile zsign for iOS (arm64)
+        # zsign 是设备端签名后端（纯 C/C++，仅依赖 OpenSSL）。
+        # zlib/minizip 已内嵌在其源码树中。交叉编译为 iOS arm64 静态链接版，
+        # 输出 /tmp/zsign，后续打包阶段复制到三套 deb 的正确路径。
+        run: |
+          set -e
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          echo "iPhoneOS SDK: $SDK"
+
+          OPENSSL_DIR=/tmp/openssl3-ios
+
+          # zsign 源码（pinned commit 保证可重现构建）
+          ZSIGN_COMMIT=d6e929c97b5b564c2cc1f82afe226a44da7149a0
+          ZS_OBJ=/tmp/zsign-obj
+          rm -rf /tmp/zsign-src "$ZS_OBJ"
+          git clone --depth 1 https://github.com/zhlynn/zsign.git /tmp/zsign-src
+          cd /tmp/zsign-src
+          git fetch --depth 1 origin "${ZSIGN_COMMIT}"
+          git checkout "${ZSIGN_COMMIT}"
+          mkdir -p "$ZS_OBJ"
+
+          CFLAGS="-isysroot $SDK -arch arm64 -mios-version-min=12.0 -O3"
+          CXXFLAGS="-isysroot $SDK -arch arm64 -mios-version-min=12.0 -O3 -std=c++11"
+
+          # zlib（C 模式——minizip 的 zip.c 传 void* 给 crc32()，C++ 下隐式转换非法）
+          for f in src/third-party/zlib/*.c; do
+            clang $CFLAGS -I src/third-party/zlib -c "$f" -o "$ZS_OBJ/$(echo "$f" | tr '/' '_').o"
+          done
+
+          # minizip（C 模式）
+          for f in src/third-party/minizip/ioapi.c src/third-party/minizip/zip.c src/third-party/minizip/unzip.c; do
+            clang $CFLAGS -I src -I src/common -I src/third-party/zlib -c "$f" -o "$ZS_OBJ/$(echo "$f" | tr '/' '_').o"
+          done
+
+          # zsign 核心 + common（C++）
+          for f in src/*.cpp src/common/*.cpp; do
+            clang++ $CXXFLAGS -I src -I src/common -I src/third-party/zlib \
+              -I ${OPENSSL_DIR}/include -DZSIGN_VERSION="${ZSIGN_COMMIT:0:8}" \
+              -c "$f" -o "$ZS_OBJ/$(echo "$f" | tr '/' '_').o"
+          done
+
+          # 链接（静态链接 OpenSSL）
+          clang++ $CXXFLAGS "$ZS_OBJ"/*.o \
+            -L ${OPENSSL_DIR}/lib -lssl -lcrypto \
+            -o /tmp/zsign
+          cd -
+
+          echo "=== zsign binary (expect Mach-O arm64 for iOS) ==="
+          file /tmp/zsign
+          lipo -info /tmp/zsign
+          ls -lh /tmp/zsign
+          echo "zsign built successfully"
+
+      - name: Sign with entitlements + 打包资源
+        run: |
+          set -e
+          LDID=$(command -v ldid)
+
+          if [ -z "$LDID" ]; then
+            echo "ldid not available, skipping CI signing (device-side zsign will sign at runtime)"
+          else
+            echo "Using ldid: $LDID"
+          fi
+
+          do_sign() {
+            local bin="$1" plist="$2"
+            if [ -n "$LDID" ]; then
+              echo "Signing $bin with $plist"
+              "$LDID" -S"$plist" "$bin"
+            else
+              echo "Skipping sign for $bin (no ldid)"
+            fi
+          }
+
+          do_sign_bare() {
+            local bin="$1"
+            if [ -n "$LDID" ]; then
+              echo "Bare-signing $bin"
+              "$LDID" -S "$bin"
+            else
+              echo "Skipping bare sign for $bin (no ldid)"
+            fi
+          }
+
+          # --- Rootless deb (Dopamine) ---
+          PKG="Packages/rootless"
+          RL="$PKG/var/jb"
+          mkdir -p "$RL/Applications" "$RL/usr/libexec" "$RL/usr/local/bin" \
+                   "$RL/usr/share/reprovision/certificates" \
+                   "$RL/Library/LaunchDaemons"
+          APP_DIR=$(find build -name "ReSign.app" -type d | head -1)
+          cp -R "$APP_DIR" "$RL/Applications/"
+          cp build/repro-helper "$RL/usr/libexec/"
+          cp /tmp/zsign "$RL/usr/local/bin/zsign"
+          chmod 0755 "$RL/usr/local/bin/zsign"
+          cp Resources/Certificates/*.pem "$RL/usr/share/reprovision/certificates/"
+
+          # 验证 Assets.car 存在（图标依赖于此文件）
+          echo "=== 验证 .app 包结构 ==="
+          ls -lah "$RL/Applications/ReSign.app/"
+          if [ -f "$RL/Applications/ReSign.app/Assets.car" ]; then
+              echo "Assets.car 存在: $(ls -lh "$RL/Applications/ReSign.app/Assets.car" | awk '{print $5}')"
+          else
+              echo "警告: Assets.car 不存在！图标可能无法显示"
+          fi
+
+          # 复制图标（供 Sileo/Cydia 显示，不影响 iOS 图标加载）
+          cp Resources/Icon.png "$RL/Applications/ReSign.app/Icon.png"
+
+          # 签名：先签二进制，不破坏 Assets.car
+          # 设置正确的权限：root 可执行
+          chmod 0755 "$RL/Applications/ReSign.app/ReSign"
+          # rootless (Dopamine) 专用 App entitlements：base + AuthKit 三件套。
+          # base 缺 com.apple.authkit.client.private / ak.anisette / authkit.internal → App 登录
+          # AKAppleIDSession 返回的 Anisette 无 X-Apple-I-MD → Apple 服务器 -80009 "MID is invalid"。
+          # v2.1.29 追加：mobileinstall allowedSPI 补齐 InstallForLaunchServices 等，
+          # 否则 App 内 LSApplicationWorkspace 安装会被 installd 的
+          # _LSValidateEntitlementsOfConnectionForVanillaInstall 拒绝（签名成功但装不上）。
+          # rootful 仍用 base（不在本修复范围）。
+          do_sign "$RL/Applications/ReSign.app/ReSign" Resources/entitlements-rootless.plist
+          do_sign "$RL/usr/libexec/repro-helper" Resources/entitlements-helper.plist
+          cp build/repro-signingd "$RL/usr/libexec/"
+          # ★ rootless (Dopamine) 专属：jbroot 在 /var/jb 且无可透明解析的 /usr/libexec，
+          #   daemon 实际装在 /var/jb/usr/libexec/repro-signingd。用通用模板（/usr/libexec/...）
+          #   在 rootless 下是死路径 → launchd 拉起即失败（exit 78）。
+          #   rootless 用专属 plist（路径写 /var/jb/usr/libexec/...）；rootful 仍用通用模板。
+          cp Resources/cn.analy.resign.signingd-rootless.plist "$RL/Library/LaunchDaemons/cn.analy.resign.signingd.plist"
+          chmod 0755 "$RL/usr/libexec/repro-signingd"
+          # v1.1.64：signingd 必须带 backboardd.launchapplications / multitasking.*assertions
+          # 才能唤醒 App 到后台并保活。此前 rootless/rootful 甚至完全没签 → 唤醒永远失败。
+          do_sign "$RL/usr/libexec/repro-signingd" Resources/entitlements-signingd.plist
+          do_sign_bare "$RL/usr/local/bin/zsign"
+          # 4755 = setuid root。postinst 里还会再设一次（CI 非 root，dpkg-deb 存不住属主）
+          chmod 4755 "$RL/usr/libexec/repro-helper"
+
+          # --- Rootful deb ---
+          PKG2="Packages/rootful"
+          mkdir -p "$PKG2/Applications" "$PKG2/usr/libexec" "$PKG2/usr/local/bin" \
+                   "$PKG2/usr/share/reprovision/certificates" \
+                   "$PKG2/Library/LaunchDaemons"
+          cp -R "$APP_DIR" "$PKG2/Applications/"
+          cp build/repro-helper "$PKG2/usr/libexec/"
+          cp /tmp/zsign "$PKG2/usr/local/bin/zsign"
+          chmod 0755 "$PKG2/usr/local/bin/zsign"
+          cp Resources/Certificates/*.pem "$PKG2/usr/share/reprovision/certificates/"
+          cp Resources/Icon.png "$PKG2/Applications/ReSign.app/Icon.png"
+          do_sign "$PKG2/Applications/ReSign.app/ReSign" Resources/entitlements-base.plist
+          do_sign "$PKG2/usr/libexec/repro-helper" Resources/entitlements-helper.plist
+          cp build/repro-signingd "$PKG2/usr/libexec/"
+          cp Resources/cn.analy.resign.signingd.plist "$PKG2/Library/LaunchDaemons/"
+          chmod 0755 "$PKG2/usr/libexec/repro-signingd"
+          do_sign "$PKG2/usr/libexec/repro-signingd" Resources/entitlements-signingd.plist
+          do_sign_bare "$PKG2/usr/local/bin/zsign"
+          chmod 4755 "$PKG2/usr/libexec/repro-helper"
+
+          # 🔀 v2.1.28：roothide 包已移至独立的 `roothide` 分支单独构建/发布（见该分支 build.yml）。
+          #    main 分支仅构建并发布 rootless(Dopamine) + rootful，避免 rootless/rootful 的改动误伤 roothide。
+
+          echo "Signing + packaging complete (rootless + rootful only)"
+
+      - name: Package debs
+        run: |
+          set -e
+          # 版本号以 DEBIAN/control 中的 Version 为准（PackageVersion.plist 的 string 字段含空值，grep 易误取）
+          VERSION=$(grep -m1 '^Version:' Packages/rootless/DEBIAN/control | awk '{print $2}')
+          echo "Version: $VERSION"
+          mkdir -p CydiaPackages
+
+          # DEBIAN 维护脚本必须有可执行权限（0555~0775），否则 dpkg-deb 报错
+          for pkg in rootless rootful; do
+            find "Packages/$pkg/DEBIAN" -type f -exec chmod 0755 {} \;
+          done
+
+          dpkg-deb -Zgzip -b Packages/rootless "CydiaPackages/cn.analy.resign_${VERSION}_iphoneos-arm64.deb"
+          dpkg-deb -Zgzip -b Packages/rootful "CydiaPackages/cn.analy.resign_${VERSION}_iphoneos-arm.deb"
+
+          ls -lh CydiaPackages/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          # 🔴 v2.1.0：手动触发（workflow_dispatch）时 github.ref_name=main 会建错 release，
+          # 用输入参数覆盖：dispatch 时传 tag_name，tag push 时用 github.ref_name。
+          tag_name: ${{ inputs.tag_name != '' && inputs.tag_name || github.ref_name }}
+          name: "ReSign ${{ inputs.tag_name != '' && inputs.tag_name || github.ref_name }}"
+          body: |
+            ## ReSign ${{ github.ref_name }}
+            ### 安装包
+            | 包 | 适用环境 |
+            |---|---|
+            | `*_iphoneos-arm64.deb` | Dopamine / rootless |
+            | `*_iphoneos-arm.deb` | rootful (iOS 13/14) |
+          files: CydiaPackages/*.deb
+          draft: false
+          prerelease: false
+
+      # 🔴 诊断通道：本机网络对 results-receiver.actions.githubusercontent.com 做 SNI 干扰，
+      # CI run 日志下载全部 421 拿不到。失败时把构建错误发成 issue，经 api.github.com 读取。
+      # 取证完成后可删除本步骤和上面的 issues: write。
+      - name: "Diagnostic: 失败时把构建错误发成 issue"
+        if: failure()
+        run: |
+          set -u
+          DIAG=$(mktemp)
+          {
+            echo "## Run ${{ github.run_id }} ref=${{ github.ref_name }}"
+            echo "## 错误行（所有 *.log）:"
+            grep -hE "error:|fatal error:|Undefined symbols|BUILD FAILED|clang: error" *.log 2>/dev/null | head -100
+            for f in *.log; do
+              [ -f "$f" ] || continue
+              echo ""
+              echo "## $f 尾部 150 行:"
+              tail -150 "$f"
+            done
+          } > "$DIAG"
+          python3 - "$DIAG" <<'PYEOF'
+          import json, os, sys, urllib.request
+          body = open(sys.argv[1], encoding='utf-8', errors='replace').read()
+          repo = os.environ['GITHUB_REPOSITORY']
+          token = os.environ['GITHUB_TOKEN']
+          title = '[CI-DIAG] %s 构建失败 %s' % (os.environ.get('GITHUB_REF_NAME', '?'), os.environ.get('GITHUB_RUN_ID', '?'))
+          data = json.dumps({'title': title, 'body': body[:60000]}).encode()
+          req = urllib.request.Request('https://api.github.com/repos/%s/issues' % repo, data=data,
+                  headers={'Authorization': 'token ' + token, 'Accept': 'application/vnd.github+json'},
+                  method='POST')
+          try:
+              with urllib.request.urlopen(req) as r:
+                  print('issue created:', r.status)
+          except Exception as e:
+              print('issue create failed:', e)
+          PYEOF
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

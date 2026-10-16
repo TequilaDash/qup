@@ -1,0 +1,334 @@
+// v2.1.0：signingd daemon 编译时的符号占位桩 + 真实运行时实现。
+//
+// 编译层：签名管线源码依赖 UIKit/CoreGraphics/AuthKit 等 daemon 不需要链接的符号，
+// 这里提供空桩满足链接器。
+//
+// 运行层（关键）：daemon 自己执行签名管线时，以下方法会被真实调用，必须可用：
+//   1. RPVAuthentication.appleIDHeadersForRequest:  —— Anisette headers（EEAppleServices
+//      每个 HTTP 请求都调它）。真实实现：dlopen AuthKit → AKAppleIDSession。
+//   2. RPVAuthentication.authenticateWithUsername:... —— daemon 不重新登录，直接读
+//      /var/mobile/Library/Resign/credentials.cache 拿 gsToken 回调成功（凭据已缓存）。
+//   3. EESigning.updateEntitlementsForBinaryAtLocation:... —— Stage 3 注册 App ID 时用，
+//      返回构造的 entitlements（application-identifier / team-identifier / keychain-access-groups），
+//      不读二进制（daemon 无 ldid C++ 库）。
+
+#import <Foundation/Foundation.h>
+#import <CoreGraphics/CoreGraphics.h>
+#import <dlfcn.h>
+#include <xpc/xpc.h>   // v2.1.20：诊断 anisette XPC 可达性（xpc_connection_*）
+
+// ─── CoreGraphics/UIKit 全局常量（匹配 SDK extern 声明，避免链接 UIKit）───────
+const CGRect CGRectZero = {{0,0},{0,0}};
+NSString *NSFontAttributeName = @"NSFont";
+
+// ─── 凭据缓存直读（RPVResources 的 getUsername/getTeamID 走 NSUserDefaults 域隔离，
+//      daemon 读不到 App 容器偏好，必须直接读共享 IPC 目录的缓存文件）─────────────
+static NSDictionary *RPVDaemonCredentials(void) {
+    return [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Resign/credentials.cache"];
+}
+
+// ─── UIKit 桩（daemon 无 UI，全部 nil 空壳）───────────────────────────────
+
+@interface UIDevice : NSObject
++ (instancetype)currentDevice;
+- (NSString *)systemVersion;
+- (NSString *)model;
+- (NSString *)name;
+- (NSString *)systemName;
+- (NSString *)localizedModel;
+- (NSUUID *)identifierForVendor;
+- (NSString *)uniqueIdentifier;
+@end
+@implementation UIDevice
++ (instancetype)currentDevice { static id d; if (!d) d = [[self alloc] init]; return d; }
+- (NSString *)systemVersion { return @"17.0"; }
+- (NSString *)systemName   { return @"iOS"; }
+- (NSString *)model        { return @"iPhone"; }
+- (NSString *)name         { return @"iPhone"; }  // 🔴 v2.1.6：EEProvisioning 设备注册必调
+- (NSString *)localizedModel { return @"iPhone"; }
+- (NSUUID *)identifierForVendor { return nil; }
+- (NSString *)uniqueIdentifier { return @""; }
+@end
+
+@interface UIApplication : NSObject
++ (instancetype)sharedApplication;
+@end
+@implementation UIApplication
++ (instancetype)sharedApplication { return nil; }
+@end
+
+@interface UIScreen : NSObject
++ (instancetype)mainScreen;
+- (CGRect)bounds;
+@end
+@implementation UIScreen
++ (instancetype)mainScreen { return nil; }
+- (CGRect)bounds { return CGRectZero; }
+@end
+
+@interface UIImage : NSObject
+@end
+@implementation UIImage
+@end
+
+// ─── AuthKit 桩（AKDevice 仅 EEAppleServices 静态引用占坑；Anisette 走动态取类）──
+
+@interface AKDevice : NSObject
++ (instancetype)currentDevice;
+- (NSString *)uniqueDeviceIdentifier;
+- (NSString *)serialNumber;
+- (NSString *)uniqueGlobalDeviceIdentifier;
+@end
+@implementation AKDevice
++ (instancetype)currentDevice { return nil; }
+- (NSString *)uniqueDeviceIdentifier { return @""; }
+- (NSString *)serialNumber { return @""; }
+- (NSString *)uniqueGlobalDeviceIdentifier { return @""; }
+@end
+
+// ─── RPVAuthentication 桩（真实 Anisette + 缓存直通登录）────────────────────
+
+// AuthKit 私有框架声明（动态取类时编译器需要 selector 签名）
+@interface AKAppleIDSession : NSObject
+- (id)initWithIdentifier:(id)arg1;
+- (id)appleIDHeadersForRequest:(id)arg1;
+@end
+
+@interface RPVAuthentication : NSObject
+@property (nonatomic, strong) NSString *clientInfoOverride;
+- (NSDictionary *)appleIDHeadersForRequest:(NSURLRequest *)request;
+- (void)authenticateWithUsername:(NSString *)username password:(NSString *)password
+                  withCompletion:(void (^)(NSError *error, NSString *userIdentity, NSString *gsToken))completion;
+- (void)requestLoginCodeWithCompletion:(void (^)(NSError *))completionHandler;
+- (void)validateLoginCode:(NSString *)code withCompletion:(void (^)(NSError *, NSString *, NSString *))completion;
+- (void)fallback2FACodeRequest:(void (^)(NSError *, NSString *, NSString *))completionHandler;
+@end
+@implementation RPVAuthentication
+
+// 真实 Anisette：优先 daemon 自己生成（v2.1.16）。
+// 🔴 v2.1.16 根因（真机 23:12 成功 / 23:29 失败实锤）：App 生成的 anisette.cache
+// 时效极短（约 15-20 分钟，23:11 缓存 23:12 有效、23:29 已被 Apple 拒 1100）。
+// daemon 每小时跑一次，用的必然是几十分钟前的旧缓存 → 大部分时间失败。
+// v2.1.4 已给 daemon entitlements 加 com.apple.private.ak.anisette +
+// com.apple.authkit.internal——若 RootHide 放行，daemon 的 AKAppleIDSession 能
+// 生成完整 Anisette（永远新鲜），不再依赖 App 缓存时效。本方法先自生成，
+// 打日志确认 MD 是否出来；缺 MD（entitlement 未放行）才 fallback App 缓存。
+- (NSDictionary *)appleIDHeadersForRequest:(NSURLRequest *)request {
+    static Class AKAppleIDSession = nil;
+    if (!AKAppleIDSession) {
+        dlopen("/System/Library/PrivateFrameworks/AuthKit.framework/AuthKit", RTLD_NOW | RTLD_GLOBAL);
+        AKAppleIDSession = NSClassFromString(@"AKAppleIDSession");
+    }
+    NSDictionary *headers = nil;
+    if (AKAppleIDSession) {
+        id session = [[AKAppleIDSession alloc] initWithIdentifier:@"com.apple.gs.xcode.auth"];
+        if ([session respondsToSelector:@selector(appleIDHeadersForRequest:)]) {
+            headers = [session appleIDHeadersForRequest:request];
+        }
+    }
+    NSMutableDictionary *result = [NSMutableDictionary dictionary];
+    if ([headers isKindOfClass:[NSDictionary class]]) {
+        [result addEntriesFromDictionary:headers];
+    }
+    // 与 RPVLoginImpl._anisetteData 相同的覆盖参数
+    result[@"X-Apple-App-Info"] = @"com.apple.gs.xcode.auth";
+    result[@"X-MMe-Client-Info"] =
+        @"<MacBookPro11,5> <Mac OS X;10.14.6;18G103> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
+
+    if ([result[@"X-Apple-I-MD"] length] > 0 && [result[@"X-Apple-I-MD-M"] length] > 0) {
+        NSLog(@"[repro-signingd] Anisette: daemon 自生成 ✅（X-Apple-I-MD=%lu 字符，永远新鲜）",
+              (unsigned long)[result[@"X-Apple-I-MD"] length]);
+        return result;
+    }
+
+    // 🔴 v2.1.20 诊断：daemon 自生成缺 MD。打印生成的全部 header keys（对比 App
+    // 缓存的 keys），并测 anisette XPC 可达性——区分「entitlement 被拒」vs
+    // 「XPC 连不上（namespace/注入拦截）」。
+    NSLog(@"[repro-signingd] Anisette: daemon 自生成缺 X-Apple-I-MD，headers keys: [%@]",
+          [[result allKeys] componentsJoinedByString:@","]);
+    {
+        NSDictionary *appCache = [NSDictionary dictionaryWithContentsOfFile:
+                                  @"/var/mobile/Library/Resign/anisette.cache"];
+        NSLog(@"[repro-signingd] Anisette: App 缓存 keys: [%@]",
+              [[[appCache allKeys] sortedArrayUsingSelector:@selector(compare:)] componentsJoinedByString:@","]);
+        // anisette XPC 可达性：xpc_connection_create 只创建连接对象，resume 后发 ping
+        // 触发连接，1 秒后看有无错误/响应回调 —— 区分 entitlement 拒绝 vs XPC 不可达。
+        // iOS SDK 把 xpc_connection_create_mach_service 标为 unavailable（编译期拦截），
+        // 但符号运行时存在，用 dlsym 动态调用（daemon 调私有 API 的一贯做法）。
+        typedef xpc_connection_t (*CreateMachFn)(const char *, dispatch_queue_t, uint64_t);
+        CreateMachFn createMach = (CreateMachFn)dlsym(RTLD_DEFAULT, "xpc_connection_create_mach_service");
+        xpc_connection_t conn = createMach ? createMach(
+            "com.apple.ak.anisette.xpc", NULL, XPC_CONNECTION_MACH_SERVICE_PRIVILEGED) : NULL;
+        if (conn) {
+            __block BOOL gotEvent = NO;
+            xpc_connection_set_event_handler(conn, ^(xpc_object_t obj) {
+                gotEvent = YES;
+                if (xpc_get_type(obj) == XPC_TYPE_ERROR) {
+                    NSLog(@"[repro-signingd] Anisette XPC 连接错误: %s",
+                          xpc_dictionary_get_string(obj, XPC_ERROR_KEY_DESCRIPTION) ?: "?");
+                } else {
+                    NSLog(@"[repro-signingd] Anisette XPC 收到响应（类型 %ld）", (long)xpc_get_type(obj));
+                }
+            });
+            xpc_connection_resume(conn);
+            xpc_object_t msg = xpc_dictionary_create(NULL, NULL, 0);
+            xpc_dictionary_set_string(msg, "command", "ping");
+            xpc_connection_send_message(conn, msg);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC),
+                           dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                NSLog(@"[repro-signingd] Anisette XPC: 1 秒内%@事件（连接对象%@创建）",
+                      gotEvent ? @"有" : @"无", conn ? @"已" : @"未");
+            });
+        } else {
+            NSLog(@"[repro-signingd] Anisette XPC: create_mach_service %@（dlsym %@）",
+                  createMach ? @"返回 NULL" : @"符号不可用",
+                  createMach ? @"成功" : @"失败");
+        }
+    }
+
+    // fallback：App 进程缓存的完整 headers（可能过期，但好过没有）
+    NSLog(@"[repro-signingd] Anisette: 用 App 缓存");
+    NSDictionary *cached = [NSDictionary dictionaryWithContentsOfFile:
+                            @"/var/mobile/Library/Resign/anisette.cache"];
+    if ([cached isKindOfClass:[NSDictionary class]] && [cached[@"X-Apple-I-MD"] length] > 0) {
+        NSMutableDictionary *merged = [NSMutableDictionary dictionaryWithDictionary:cached];
+        // v2.1.5：更新 Client-Time 为当前时间
+        NSDateFormatter *utcFmt = [[NSDateFormatter alloc] init];
+        utcFmt.locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
+        utcFmt.dateFormat = @"yyyy-MM-dd'T'HH:mm:ss'Z'";
+        utcFmt.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];
+        merged[@"X-Apple-I-Client-Time"] = [utcFmt stringFromDate:[NSDate date]];
+        merged[@"X-Apple-App-Info"] = @"com.apple.gs.xcode.auth";
+        merged[@"X-MMe-Client-Info"] =
+            @"<MacBookPro11,5> <Mac OS X;10.14.6;18G103> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
+        return merged;
+    }
+    return result;
+}
+
+// daemon 不重新登录：凭据已由 App 登录时缓存在 /var/mobile/Library/Resign/credentials.cache
+- (void)authenticateWithUsername:(NSString *)username password:(NSString *)password
+                  withCompletion:(void (^)(NSError *error, NSString *userIdentity, NSString *gsToken))completion {
+    NSDictionary *cred = RPVDaemonCredentials();
+    NSString *gsToken = cred[@"password"];
+    NSString *identity = cred[@"username"];
+    if (gsToken.length > 0 && identity.length > 0) {
+        // 缓存直通：username 格式为 "apple_id|DSID"，取后段作为 identity
+        NSArray *parts = [identity componentsSeparatedByString:@"|"];
+        NSString *dsid = parts.count >= 2 ? parts[1] : identity;
+        if (completion) completion(nil, dsid, gsToken);
+        return;
+    }
+    if (completion) completion([NSError errorWithDomain:@"RPVDaemon" code:-1
+                                               userInfo:@{NSLocalizedDescriptionKey:@"daemon 无凭据缓存"}], nil, nil);
+}
+
+- (void)requestLoginCodeWithCompletion:(void (^)(NSError *))completionHandler {
+    if (completionHandler) completionHandler([NSError errorWithDomain:@"RPVDaemon" code:-2
+                                                             userInfo:@{NSLocalizedDescriptionKey:@"daemon 不走 2FA 登录"}]);
+}
+- (void)validateLoginCode:(NSString *)code withCompletion:(void (^)(NSError *, NSString *, NSString *))completion {
+    if (completion) completion([NSError errorWithDomain:@"RPVDaemon" code:-2
+                                               userInfo:@{NSLocalizedDescriptionKey:@"daemon 不走 2FA 登录"}], nil, nil);
+}
+- (void)fallback2FACodeRequest:(void (^)(NSError *, NSString *, NSString *))completionHandler {
+    if (completionHandler) completionHandler([NSError errorWithDomain:@"RPVDaemon" code:-2
+                                                              userInfo:@{NSLocalizedDescriptionKey:@"daemon 不走 2FA 登录"}], nil, nil);
+}
+@end
+
+// ─── EESigning 桩（Stage 3 App ID 注册用的 entitlements 构造）──────────────
+
+@interface EESigning : NSObject
++ (NSMutableDictionary *)getEntitlementsForBinaryAtLocation:(NSString *)binaryLocation;
++ (NSDictionary *)updateEntitlementsForBinaryAtLocation:(NSString *)binaryLocation
+                                      bundleIdentifier:(NSString *)bundleIdentifier
+                                                teamID:(NSString *)teamid;
+@end
+@implementation EESigning
+
+// daemon 无 ldid C++ 库，不读二进制；返回空 dict 由调用方补 application-identifier。
++ (NSMutableDictionary *)getEntitlementsForBinaryAtLocation:(NSString *)binaryLocation {
+    return [NSMutableDictionary dictionary];
+}
+
+// 与 EESigning.mm 原实现等价：构造 application-identifier / team-identifier / keychain-access-groups
++ (NSDictionary *)updateEntitlementsForBinaryAtLocation:(NSString *)binaryLocation
+                                      bundleIdentifier:(NSString *)bundleIdentifier
+                                                teamID:(NSString *)teamid {
+    NSMutableDictionary *plist = [NSMutableDictionary dictionary];
+    NSString *applicationId = bundleIdentifier;
+    // 处理 identifier 已含 TeamID 前缀的情况
+    NSString *teamPrefix = [NSString stringWithFormat:@"%@.", teamid];
+    if (![applicationId hasPrefix:teamPrefix]) {
+        applicationId = [NSString stringWithFormat:@"%@%@", teamPrefix, applicationId];
+    }
+    plist[@"application-identifier"] = applicationId;
+    plist[@"com.apple.developer.team-identifier"] = teamid;
+    plist[@"keychain-access-groups"] = @[ [NSString stringWithFormat:@"%@.*", teamid] ];
+    return plist;
+}
+@end
+
+// ─── RPVDiagnostic（daemon 用 s_log 自记，改为追加写入同一个日志文件）────────
+
+/// 去掉 ANSI 转义序列（zsign 等会输出 \x1b[32m 颜色码，写进 reprorefresh_at.log
+/// 后在纯文本查看器里变成乱码）。
+static NSString *rpv_strip_ansi(NSString *s) {
+    if (s.length == 0) return s;
+    NSRegularExpression *re = [NSRegularExpression
+        regularExpressionWithPattern:@"\\x1b\\[[0-9;]*[A-Za-z]"
+                              options:0 error:nil];
+    NSString *out = [re stringByReplacingMatchesInString:s
+                                                 options:0
+                                                   range:NSMakeRange(0, s.length)
+                                            withTemplate:@""];
+    // 兜底：清掉裸 ESC（八进制 \033 = 0x1B）。不能写 @"\u001b"：
+    // C/ObjC 禁止 UCN 表示控制字符 → error: universal character name refers to a control character。
+    return [out stringByReplacingOccurrencesOfString:@"\033" withString:@""];
+}
+
+void RPVDiagnostic(int level, NSString *tag, NSString *fmt, ...) {
+    // 🔴 v2.1.10：RZSignRunner 用 RPVDiagnostic 打印 zsign 完整命令行，之前空实现
+    // → zsign 到底传了什么参数永远看不到（真机 21:31 实锤：Stage 1-4 全成功但
+    // zsign 报 Can't find provision file）。这里追加写入 daemon 日志文件。
+    // 🔴 v2.1.31：写文件前先剥离 ANSI 转义序列，避免 reprorefresh_at.log 变乱码。
+    va_list args;
+    va_start(args, fmt);
+    NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:args];
+    va_end(args);
+    NSString *clean = rpv_strip_ansi(msg);
+    FILE *f = fopen("/var/mobile/Library/Resign/reprorefresh_at.log", "a");
+    if (f) {
+        // 🔴 v2.1.31 乱码主因：这里原本写成 "%@"。C 的 fprintf 根本不认 %@
+        // （那是 NSString/CFString 格式化的扩展），Darwin libc 遇到未知说明符
+        // 不消费对应参数 → 后面的 %s 实际拿到的是 tag 这个 NSString 对象指针，
+        // 把对象内存当 C 字符串打印出来 → reprorefresh_at.log 每一行都是乱码。
+        // 必须用 %s + UTF8String。
+        const char *tagC = tag.length ? tag.UTF8String : "-";
+        const char *msgC = clean.length ? clean.UTF8String : "";
+        fprintf(f, "[RPVDiagnostic:%s] %s\n", tagC, msgC);
+        fclose(f);
+    }
+}
+
+// ─── libMobileGestalt（daemon 经 dlopen 调用真实的 libMobileGestalt）────────
+// 之前整函数 stub 成返回 NULL，导致 PROFILE MATCH 诊断读不到设备 UDID。
+// 这里运行期动态加载系统 libMobileGestalt 取真实答案；若加载/解析失败则退回 NULL（行为不变）。
+// （与 roothide v2.2.3 同步的通用修复。）
+#include <dispatch/dispatch.h>
+
+CFTypeRef MGCopyAnswer(CFStringRef question) {
+    static CFTypeRef (*s_real)(CFStringRef) = NULL;
+    static dispatch_once_t s_once;
+    dispatch_once(&s_once, ^{
+        void *h = dlopen("/System/Library/PrivateFrameworks/MobileGestalt.framework/MobileGestalt",
+                        RTLD_LAZY | RTLD_LOCAL);
+        if (h) {
+            // 指定 handle 取本库自身符号，规避主程序对该符号的占位桩拦截。
+            s_real = (CFTypeRef (*)(CFStringRef))dlsym(h, "MGCopyAnswer");
+        }
+    });
+    if (s_real) return s_real(question);
+    return NULL;
+}

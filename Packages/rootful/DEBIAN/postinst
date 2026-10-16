@@ -1,0 +1,89 @@
+#!/bin/bash
+#
+# RePro (rootful) postinst
+#
+# 本版本已经没有常驻守护进程。需要 root 的两件事（跨沙箱复制 IPA、
+# 把描述文件写进 /var/Managed Preferences/mobile）由 App 按需 posix_spawn
+# 拉起 repro-helper 完成，做完即退出，所以这里不再有任何 launchctl 操作。
+#
+
+# Rootful layout: binaries live at the real root, not under /var/jb.
+JB_PREFIX=""
+
+function finish() {
+	f="${1}"
+	[[ -z "${f}" || -z "${CYDIA}" ]] && return
+	cydia=(${CYDIA})
+	[[ ${cydia[1]} -eq 1 ]] || return
+	echo "finish:${f}" >&${cydia[0]}
+}
+
+# Clear Inbox folder
+if [ -d "/var/mobile/Library/Application Support/Containers/cn.analy.resign.ios/Documents/Inbox" ]; then
+	rm -rf "/var/mobile/Library/Application Support/Containers/cn.analy.resign.ios/Documents/Inbox"
+fi
+
+# 从旧版本（带 reprovisiond 守护进程）升级时的兜底清理。
+for c in "/bin/launchctl" "/usr/bin/launchctl"; do
+	if [ -x "$c" ]; then
+		"$c" bootout system/cn.analy.resignd 2>/dev/null || true
+		break
+	fi
+done
+pkill -x reprovisiond 2>/dev/null || true
+
+# 按需 root helper：必须 root:wheel + setuid（4755）。
+HELPER_BIN="${JB_PREFIX}/usr/libexec/repro-helper"
+if [ -f "$HELPER_BIN" ]; then
+	chown root:wheel "$HELPER_BIN" 2>/dev/null || true
+	chmod 4755 "$HELPER_BIN" 2>/dev/null || true
+	echo "root helper: $(ls -l "$HELPER_BIN")"
+fi
+
+# 后台定时续签守护进程
+SIGNINGD_BIN="${JB_PREFIX}/usr/libexec/repro-signingd"
+if [ -f "$SIGNINGD_BIN" ]; then
+	chown root:wheel "$SIGNINGD_BIN" 2>/dev/null || true
+	chmod 0755 "$SIGNINGD_BIN" 2>/dev/null || true
+	echo "signing daemon: $(ls -l "$SIGNINGD_BIN")"
+fi
+
+ZSIGN_BIN="${JB_PREFIX}/usr/local/bin/zsign"
+if [ -f "$ZSIGN_BIN" ]; then
+	chown root:wheel "$ZSIGN_BIN" 2>/dev/null || true
+	chmod 0755 "$ZSIGN_BIN" 2>/dev/null || true
+fi
+
+# App 二进制权限
+APP_BIN="${JB_PREFIX}/Applications/ReSign.app/ReSign"
+if [ -f "$APP_BIN" ]; then
+	chmod 0755 "$APP_BIN" 2>/dev/null || true
+fi
+
+# Reload application cache via uicache
+echo "Reloading application cache"
+UICACHE=""
+for c in "/usr/bin/uicache" "/bin/uicache"; do
+	if [ -x "$c" ]; then UICACHE="$c"; break; fi
+done
+if [ -n "$UICACHE" ]; then
+	"$UICACHE" -p "/Applications/ReSign.app" || "$UICACHE" -a || true
+fi
+
+# 加载后台定时续签守护进程
+SIGNINGD_PLIST="/Library/LaunchDaemons/cn.analy.resign.signingd.plist"
+LAUNCHCTL=""
+for c in "/bin/launchctl" "/usr/bin/launchctl"; do
+	if [ -x "$c" ]; then LAUNCHCTL="$c"; break; fi
+done
+if [ -n "$LAUNCHCTL" ] && [ -f "$SIGNINGD_PLIST" ]; then
+	chown root:wheel "$SIGNINGD_PLIST" 2>/dev/null || true
+	chmod 644 "$SIGNINGD_PLIST" 2>/dev/null || true
+	"$LAUNCHCTL" bootout system "$SIGNINGD_PLIST" >/dev/null 2>&1 || "$LAUNCHCTL" unload "$SIGNINGD_PLIST" >/dev/null 2>&1 || true
+	"$LAUNCHCTL" bootstrap system "$SIGNINGD_PLIST" >/dev/null 2>&1 || "$LAUNCHCTL" load "$SIGNINGD_PLIST" >/dev/null 2>&1 || true
+	echo "signingd launched（后台定时续签守护进程）"
+fi
+
+echo "Do, or do not. There is no try."
+finish restart
+exit 0

@@ -1,0 +1,698 @@
+import SwiftUI
+import UIKit
+import Darwin
+
+// MARK: - 设置页面
+
+struct SettingsView: View {
+    @AppStorage("autoResign") private var autoResign: Bool = true
+    @AppStorage("resignThreshold") private var resignThreshold: Int = 2
+    // v1.1.184：检测间隔（小时）。键名必须与 repro-signingd.m 的 s_parseCfg() 读取的键一致。
+    @AppStorage("resignCheckInterval") private var resignCheckInterval: Int = 1
+
+    // 免费账号「同一设备最多 3 个自签应用」限制绕过。
+    // 键名必须与 repro-signingd.m 的 s_bypassEnabled() 读取的键一致。
+    @AppStorage("bypassFreeAppLimit") private var bypassFreeAppLimit: Bool = false
+
+    // v1.1.128：低电量强制续签。键名必须与 repro-signingd.m 的 s_parseCfg() 读取的键一致。
+    @AppStorage("forceResignLowPower") private var forceResignLowPower: Bool = false
+
+    /// 越狱联网修复（国行蜂窝/WiFi 权限重置）：执行中标记 + 结果弹窗
+    @State private var isFixingCellular: Bool = false
+    @State private var showFixCellularAlert: Bool = false
+    @State private var fixCellularMessage: String = ""
+
+    // 通知开关。键名必须与 RPVNotificationManager.h 里的常量一致。
+    @AppStorage("notificationsEnabled") private var notificationsEnabled: Bool = true
+    @AppStorage("notificationsDebug") private var notificationsDebug: Bool = false
+    /// 系统授权状态描述，onAppear 时刷新
+    @State private var notifyStatusText: String = "检查中…"
+    @State private var notifyNeedsSystemSettings = false
+
+    /// 日志文件大小（onAppear 时更新）
+    @State private var logFileSize: String = "—"
+    @State private var showingClearLogAlert = false
+    @State private var needsConfigSync = false
+
+    /// v1.1.186：下次检测时间（从 signingd 检测状态推算，onAppear / 间隔变化时刷新）
+    @State private var nextCheckText: String = "—"
+
+    @ObservedObject private var account = BridgeClient.shared
+
+    /// 小黑屋存储（只读用于显示数量，清空按钮直接操作它）
+    @ObservedObject private var blacklist = BlacklistStore.shared
+
+    @State private var appleID: String = BridgeClient.shared.username ?? ""
+    @State private var password: String = BridgeClient.shared.savedPassword ?? ""
+    @State private var isLoggingIn = false
+    /// 登录后：账户 / TeamID 是否明文显示（默认隐藏，点眼睛切换）
+    @State private var showAccount = false
+    @State private var showTeamID = false
+    /// 登录前：密码框是否明文显示
+    @State private var showPwdBefore = false
+    /// 登录前：Apple ID 框是否明文显示（默认显示，点眼睛可掩码）
+    @State private var showAppleIDBefore = true
+    @State private var loginMessage: String?
+    @State private var loginSucceeded = false
+    /// 登录超时看门狗：网络卡住时自动解除“登录中”状态，避免界面永久“卡住”（不自动重试，仅恢复可点击）。
+    @State private var loginAttempt: Int = 0
+    @State private var loginTimeoutWorkItem: DispatchWorkItem?
+    private let loginTimeout: TimeInterval = 30
+
+    @State private var availableTeams: [DeveloperTeam] = []
+    @State private var showingTeamSheet = false
+
+    @State private var showingSignOutAlert = false
+    @State private var showingCertificates = false
+
+    var body: some View {
+        NavigationView {
+            Form {
+                accountSection
+                autoResignSection
+                networkFixSection
+                freeLimitSection
+                blacklistSection
+                notificationSection
+                systemSection
+                aboutSection
+            }
+            .navigationTitle("设置")
+            .onAppear {
+                refreshAccountOnly()
+                refreshLogFileSize()
+                refreshNotificationStatus()
+                refreshNextCheckText()
+                needsConfigSync = false
+            }
+            .onChange(of: autoResign) { _ in needsConfigSync = true }
+            .onChange(of: resignThreshold) { _ in needsConfigSync = true }
+            .onChange(of: resignCheckInterval) { _ in
+                needsConfigSync = true
+                refreshNextCheckText()
+            }
+            .onChange(of: forceResignLowPower) { _ in needsConfigSync = true }
+            .onChange(of: account.isSignedIn) { signedIn in
+                // 退出登录后，重置登录前输入框（带已保存凭据预填）与显示开关
+                if !signedIn {
+                    appleID = account.username ?? ""
+                    password = account.savedPassword ?? ""
+                    showAccount = false
+                    showTeamID = false
+                    showPwdBefore = false
+                    showAppleIDBefore = true
+                }
+            }
+            .onDisappear {
+                if needsConfigSync {
+                    NotificationCenter.default.post(name: NSNotification.Name("cn.analy.resign.signingd-config-updated"), object: nil)
+                }
+            }
+            .alert("退出登录", isPresented: $showingSignOutAlert) {
+                Button("取消", role: .cancel) {}
+                Button("退出", role: .destructive) {
+                    account.signOut()
+                    loginMessage = nil
+                    loginSucceeded = false
+                    LogManager.shared.info("已退出 Apple ID", source: "SettingsView")
+                }
+            } message: {
+                Text("退出后需要重新登录才能继续重签名。")
+            }
+            .alert("清理续签日志", isPresented: $showingClearLogAlert) {
+                Button("取消", role: .cancel) {}
+                Button("清理", role: .destructive) { clearDaemonLog() }
+            } message: {
+                Text("确定要清空 reprorefresh_at.log 吗？此操作不可撤销。")
+            }
+            .alert("修复当前插件联网问题", isPresented: $showFixCellularAlert) {
+                Button("好", role: .cancel) {}
+            } message: {
+                Text(fixCellularMessage)
+            }
+            .sheet(isPresented: $showingTeamSheet) { teamSheet }
+        }
+        .navigationViewStyle(.stack)
+    }
+
+    // MARK: - 账号
+
+    @ViewBuilder
+    private var accountSection: some View {
+        Section("Apple ID 账户") {
+            if account.isSignedIn {
+                // 账号：默认掩码，点眼睛明文
+                HStack {
+                    Text("账号")
+                    Spacer()
+                    Text(showAccount ? (account.username ?? "-") : Self.masked(account.username))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                    Button {
+                        showAccount.toggle()
+                    } label: {
+                        Image(systemName: showAccount ? "eye.slash.fill" : "eye.fill")
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.borderless)
+                }
+                // Team ID：默认掩码，点眼睛明文
+                HStack {
+                    Text("Team ID")
+                    Spacer()
+                    Text(showTeamID ? (account.teamID ?? "-") : Self.masked(account.teamID))
+                        .font(.system(.callout, design: .monospaced))
+                        .foregroundColor(.secondary)
+                    Button {
+                        showTeamID.toggle()
+                    } label: {
+                        Image(systemName: showTeamID ? "eye.slash.fill" : "eye.fill")
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.borderless)
+                }
+                Button("退出登录", role: .destructive) {
+                    showingSignOutAlert = true
+                }
+            } else {
+                // 登录前：Apple ID + 密码信息栏（预填已保存凭据，密码默认掩码可点眼睛查看）
+                HStack {
+                    if showAppleIDBefore {
+                        TextField("Apple ID", text: $appleID)
+                    } else {
+                        SecureField("Apple ID", text: $appleID)
+                    }
+                    Button {
+                        showAppleIDBefore.toggle()
+                    } label: {
+                        // v1.1.101: 「当前状态语义」——睁眼=明文（能看见）、闭眼=掩码（被遮住），
+                        // 与用户直觉一致。密码框与登录后账号行保持 iOS 系统标准（点击后状态语义）不动。
+                        Image(systemName: showAppleIDBefore ? "eye.fill" : "eye.slash.fill")
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.borderless)
+                }
+                .textContentType(.username)
+                .keyboardType(.emailAddress)
+                .autocapitalization(.none)
+                .disableAutocorrection(true)
+                HStack {
+                    if showPwdBefore {
+                        TextField("密码", text: $password)
+                    } else {
+                        SecureField("密码", text: $password)
+                    }
+                    Button {
+                        showPwdBefore.toggle()
+                    } label: {
+                        // v1.1.102: 与 Apple ID 框统一为「当前状态语义」——
+                        // 睁眼=明文（能看见）、闭眼=掩码（被遮住），与用户直觉一致。
+                        Image(systemName: showPwdBefore ? "eye.fill" : "eye.slash.fill")
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.borderless)
+                }
+                .textContentType(.password)
+                .autocapitalization(.none)
+                .disableAutocorrection(true)
+
+                if isLoggingIn {
+                    HStack {
+                        ProgressView().scaleEffect(0.8)
+                        Text("正在登录…").foregroundColor(.secondary)
+                    }
+                }
+
+                if let message = loginMessage {
+                    Text(message)
+                        .font(.callout)
+                        .foregroundColor(loginSucceeded ? .green : .red)
+                }
+
+                Button(isLoggingIn ? "登录中…" : "登录") {
+                    performLogin()
+                }
+                .disabled(isLoggingIn || appleID.isEmpty || password.isEmpty)
+            }
+        }
+    }
+
+    /// 把敏感字符串掩码：保留首尾、中间用圆点替代，空值返回 "-"
+    private static func masked(_ value: String?) -> String {
+        guard let s = value, !s.isEmpty else { return "-" }
+        if s.count <= 3 { return String(repeating: "•", count: s.count) }
+        let head = String(s.prefix(2))
+        let tail = String(s.suffix(1))
+        return head + String(repeating: "•", count: max(4, s.count - 3)) + tail
+    }
+
+    // MARK: - 自动重签
+
+    private var autoResignSection: some View {
+        Section {
+            Toggle("启用自动重签", isOn: $autoResign)
+            // v1.1.148: 上限从 7 改为 6 —— 免费 Apple ID 的 profile 有效期只有 7 天，
+            // 若允许「提前 7 天」= 刚签完就永远在到期窗口内 → 冷却一过（24h）就再次全量重签，
+            // 表现为「每隔一两天又续签」。上限 6 天 + 24h 冷却 = 免费账号最多每天签一次。
+            // 🔴 v1.1.184：24h 冷却已删除（用户要求）；窗口判定改「严格小于」——
+            // 剩余有效期必须 < 提前天数才进窗口，刚签完剩余 7 天 > 6 天窗口，自然隔天再签。
+            Stepper("提前 \(resignThreshold) 天重签", value: $resignThreshold, in: 1...6)
+
+            // v1.1.128：低电量强制续签（原版 ReProvision 默认低电量跳过；开启后不跳过）
+            Toggle("低电量强制续签", isOn: $forceResignLowPower)
+
+            // 🔴 v1.1.184：把「检测间隔」接回设置页（v1.1.158 曾因 signingd 短命化而移除）。
+            // launchd 每小时拉起 daemon 一次，daemon 按这里的间隔决定本轮是否真正检测续签；
+            // 上限 12 小时是用户要求（改大 = 省电省流量，改小 = 到期前更及时）。
+            Stepper("检测间隔 \(resignCheckInterval) 小时", value: $resignCheckInterval, in: 1...12)
+
+            // v1.1.186：展示「下次检测」时间（读 signingd 检测状态推算，用户一眼看到检查何时到期）
+            HStack {
+                Text("下次检测")
+                Spacer()
+                Text(nextCheckText)
+                    .foregroundColor(.secondary)
+            }
+        } header: {
+            Text("自动重签")
+        } footer: {
+            VStack(alignment: .leading, spacing: 8) {
+                // v1.1.184: 冷却已取消，续签频率 = 检测间隔 + 提前重签窗口（严格小于）
+                Text("检测间隔：多久检查一次应用是否进入续签窗口（最多 12 小时）。提前重签窗口：剩余有效期严格少于设定的天数才会重签，所以刚续签完不会立刻再签。免费 Apple ID 的签名有效期只有 7 天，建议提前 2~3 天重签。")
+
+                HStack {
+                    Text("日志大小：")
+                    Text(logFileSize)
+                        .fontWeight(.medium)
+                    Spacer()
+                    Button("清理日志") {
+                        showingClearLogAlert = true
+                    }
+                    .font(.caption)
+                    .foregroundColor(.red)
+                }
+                .padding(.top, 4)
+            }
+        }
+    }
+
+    // MARK: - 免费账号应用数量限制
+
+    private var freeLimitSection: some View {
+        Section {
+            Toggle("自动绕过 3 应用限制", isOn: $bypassFreeAppLimit)
+                .onChange(of: bypassFreeAppLimit) { newValue in
+                    needsConfigSync = true
+                    LogManager.shared.info("3 应用限制绕过已\(newValue ? "开启" : "关闭")", source: "SettingsView")
+                    if newValue {
+                        // 立刻对现有已安装应用执行一次，不必等下次签名
+                        RPVSigningdNotify.notifyBypass3AppRequest()
+                    }
+                }
+        } header: {
+            Text("免费账号限制")
+        }
+    }
+
+    // MARK: - 联网修复（国行蜂窝/WiFi 权限重置，只修复当前插件自身）
+
+    private var networkFixSection: some View {
+        Section {
+            Button {
+                fixCellularTapped()
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "antenna.radiowaves.left.and.right")
+                        .font(.title3)
+                        .foregroundColor(.blue)
+                        .frame(width: 32)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("修复本插件联网")
+                            .font(.body)
+                            .foregroundColor(.primary)
+                    }
+
+                    Spacer()
+
+                    if isFixingCellular {
+                        ProgressView()
+                            .scaleEffect(0.7)
+                    } else {
+                        Image(systemName: "chevron.right")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+            .disabled(isFixingCellular)
+        } header: {
+            Text("联网修复")
+        }
+    }
+
+    private func fixCellularTapped() {
+        guard !isFixingCellular else { return }
+        isFixingCellular = true
+        RPVBridge.sharedInstance().fixCellularData { success, message in
+            isFixingCellular = false
+            fixCellularMessage = message ?? (success ? "修复完成" : "修复失败")
+            showFixCellularAlert = true
+        }
+    }
+
+    // MARK: - 小黑屋
+
+    private var blacklistSection: some View {
+        Section {
+            HStack {
+                Text("已拉黑应用")
+                Spacer()
+                Text("\(blacklist.entries.count) 个")
+                    .foregroundColor(.secondary)
+            }
+
+            if !blacklist.entries.isEmpty {
+                Button("清空小黑屋", role: .destructive) {
+                    BlacklistStore.shared.clear()
+                    LogManager.shared.info("设置页清空小黑屋", source: "SettingsView")
+                }
+            }
+
+            HStack(spacing: 6) {
+                Image(systemName: "info.circle")
+                    .foregroundColor(.secondary)
+                Text("被拉黑的应用会被自动续签 / 批量签名跳过，但手动点击「重签」仍可为其签名。")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        } header: {
+            Text("小黑屋")
+        }
+    }
+
+    // MARK: - 通知
+
+    private var notificationSection: some View {
+        Section {
+            Toggle("重签通知", isOn: $notificationsEnabled)
+            Toggle("详细通知", isOn: $notificationsDebug)
+                .disabled(!notificationsEnabled)
+
+            HStack {
+                Text("系统权限")
+                Spacer()
+                Text(notifyStatusText)
+                    .foregroundColor(notifyNeedsSystemSettings ? .red : .secondary)
+            }
+
+            // 🔴 v1.1.189：手动「重新申请」入口。
+            // 状态为「未申请」时点击会弹系统授权框；已授权点击无副作用（系统不会重复弹）。
+            // 已拒绝时 App 内任何 API 都无法再弹窗（iOS 硬性限制），只能去系统设置改，
+            // 这里明确说明原因，避免误导用户以为点一下就能开。
+            if notifyNeedsSystemSettings {
+                Button("前往系统设置开启（系统已拒绝，只能在系统设置中更改）") {
+                    openSystemNotificationSettings()
+                }
+            } else {
+                Button("重新申请通知权限") {
+                    RPVNotificationManager.sharedInstance().registerToSendNotifications()
+                    // 授权框结果稍后反映到状态栏（弹窗期间状态还是旧的）
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        MainActor.assumeIsolated {
+                            refreshNotificationStatus()
+                        }
+                    }
+                }
+            }
+        } header: {
+            Text("通知")
+        }
+    }
+
+    private func refreshNotificationStatus() {
+        RPVNotificationManager.sharedInstance().fetchAuthorizationStatus { status in
+            MainActor.assumeIsolated {
+            // 取值同 UNAuthorizationStatus
+            switch status {
+            case 0:
+                notifyStatusText = "未申请"
+                notifyNeedsSystemSettings = false
+            case 1:
+                notifyStatusText = "已拒绝"
+                notifyNeedsSystemSettings = true
+            case 2:
+                notifyStatusText = "已授权"
+                notifyNeedsSystemSettings = false
+            case 3:
+                notifyStatusText = "临时授权"
+                notifyNeedsSystemSettings = false
+            case 4:
+                notifyStatusText = "仅定时摘要"
+                notifyNeedsSystemSettings = true
+            default:
+                notifyStatusText = "未知"
+                notifyNeedsSystemSettings = false
+            }
+            }
+        }
+    }
+
+    private func openSystemNotificationSettings() {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        UIApplication.shared.open(url)
+    }
+
+    // MARK: - 系统操作
+
+    private var systemSection: some View {
+        Section {
+            NavigationLink(destination: AppIDsView()) {
+                HStack {
+                    Image(systemName: "number")
+                    Text("查询已注册 AppID")
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .disabled(!account.isSignedIn)
+
+            NavigationLink(destination: CertificatesView()) {
+                HStack {
+                    Image(systemName: "lock.shield")
+                    Text("管理证书")
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .disabled(!account.isSignedIn)
+
+            // 描述文件管理（v1.1.171）：不依赖登录状态，清单由 root 守护进程从
+            // 真实 rootfs 的 /var/Managed Preferences/mobile 导出
+            NavigationLink(destination: ProfilesView()) {
+                HStack {
+                    Image(systemName: "doc.badge.gearshape")
+                    Text("管理描述文件")
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            // v1.1.184：「重启 SpringBoard」已从系统操作里移除。
+            // 需要 respring 的场景（重建图标缓存 / 重新注册 App）在「系统状态 → 工具」里，
+            // 那边的入口会连带做完 uicache + 重启 lsd，比单独 respring 有用。
+        } header: {
+            Text("系统操作")
+        }
+    }
+
+    // MARK: - 关于
+
+    private var aboutSection: some View {
+        Section("关于") {
+            HStack {
+                Text("版本")
+                Spacer()
+                Text(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "-")
+                    .foregroundColor(.secondary)
+            }
+            if let url = URL(string: "https://www.coolapk.com/u/32152768") {
+                Link("作者主页", destination: url)
+            }
+        }
+    }
+
+    // MARK: - Team 选择弹窗
+
+    private var teamSheet: some View {
+        NavigationView {
+            List(availableTeams) { team in
+                Button {
+                    selectTeam(team)
+                } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(team.name)
+                            .foregroundColor(.primary)
+                        HStack(spacing: 6) {
+                            Text(team.teamID)
+                                .font(.system(.caption, design: .monospaced))
+                            if let membership = team.membership {
+                                Text("·").font(.caption)
+                                Text(membership).font(.caption)
+                            }
+                        }
+                        .foregroundColor(.secondary)
+                    }
+                }
+            }
+            .navigationTitle("选择开发者 Team")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") {
+                        showingTeamSheet = false
+                        isLoggingIn = false
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - 动作
+
+    private func performLogin() {
+        attemptLogin()
+    }
+
+    /// 一次登录尝试：带超时看门狗。登录失败后解除“登录中”状态、允许手动再次点击登录（按钮不再置灰）。
+    /// 每次尝试用 loginAttempt 作为 epoch，旧的迟到回调会被忽略，避免重复处理。
+    private func attemptLogin() {
+        loginTimeoutWorkItem?.cancel()
+
+        let attempt = loginAttempt + 1
+        loginAttempt = attempt
+
+        isLoggingIn = true
+        loginSucceeded = false
+        loginMessage = nil
+
+        let workItem = DispatchWorkItem { [self] in
+            MainActor.assumeIsolated {
+            guard self.loginAttempt == attempt else { return }
+            self.isLoggingIn = false
+            self.loginSucceeded = false
+            self.loginMessage = "登录超时（网络可能不稳定），请重试"
+            LogManager.shared.error("Apple ID 登录超时（\(Int(self.loginTimeout))s 无响应）", source: "SettingsView")
+            self.handleLoginFailure(reason: "timeout")
+            }
+        }
+        loginTimeoutWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + loginTimeout, execute: workItem)
+
+        account.login(appleID: appleID, password: password) { [self] step in
+            guard self.loginAttempt == attempt else { return }
+            workItem.cancel()
+            self.handleLoginStep(step)
+        }
+    }
+
+    private func handleLoginStep(_ step: BridgeClient.LoginStep) {
+        switch step {
+        case .chooseTeam(let teams):
+            if teams.count == 1, let only = teams.first {
+                selectTeam(only)
+            } else if teams.isEmpty {
+                isLoggingIn = false
+                loginMessage = "该 Apple ID 下没有可用的开发者 Team"
+                LogManager.shared.error("登录成功但没有可用 Team", source: "SettingsView")
+            } else {
+                availableTeams = teams
+                showingTeamSheet = true
+            }
+
+        case .needsTwoFactor:
+            loginMessage = "该 Apple ID 开启了两步验证，请在系统弹出的验证界面完成确认…"
+            loginSucceeded = false
+            LogManager.shared.info("账号需要两步验证，拉起系统验证界面", source: "SettingsView")
+            account.continueTwoFactor { [self] next in
+                if case .needsTwoFactor = next {
+                    self.isLoggingIn = false
+                    self.loginMessage = "两步验证未完成，请重试"
+                    return
+                }
+                self.handleLoginStep(next)
+            }
+
+        case .failed(let reason):
+            handleLoginFailure(reason: reason)
+        }
+    }
+
+    /// 登录失败统一处理：解除“登录中”状态、展示失败原因，并恢复“登录”按钮可点击
+    /// （isLoggingIn=false 使被禁用的按钮恢复，用户可自行再次点击），不自动重试、不弹窗。
+    private func handleLoginFailure(reason: String) {
+        isLoggingIn = false
+        loginSucceeded = false
+        loginMessage = "登录失败: \(reason)"
+        LogManager.shared.error("Apple ID 登录失败: \(reason)", source: "SettingsView")
+    }
+
+    private func selectTeam(_ team: DeveloperTeam) {
+        showingTeamSheet = false
+        isLoggingIn = true
+
+        account.selectTeam(team) { result in
+            isLoggingIn = false
+            switch result {
+            case .success:
+                loginSucceeded = true
+                loginMessage = "登录成功"
+                password = ""
+                LogManager.shared.info("Apple ID 登录成功，Team = \(team.teamID)", source: "SettingsView")
+            case .failure(let error):
+                loginSucceeded = false
+                loginMessage = "注册设备失败: \(error.localizedDescription)"
+                LogManager.shared.error("注册设备失败: \(error.localizedDescription)", source: "SettingsView")
+            }
+        }
+    }
+
+    /// v1.1.160：签名后端（zsign 路径/状态）已统一展示在「健康状态」页，设置页不再重复拉取。
+    private func refreshAccountOnly() {
+        account.refreshAccountState()
+    }
+
+    private func refreshLogFileSize() {
+        logFileSize = DaemonLogSize(DaemonLogDefaultPath())
+    }
+
+    private func clearDaemonLog() {
+        DaemonLogClear(DaemonLogDefaultPath())
+        refreshLogFileSize()
+    }
+
+    /// v1.1.186：推算「下次检测」时间。
+    /// 读 signingd 写下的检测状态（豁免目录，App 可读）：lastCheckTime + 检测间隔。
+    private func refreshNextCheckText() {
+        guard let dict = NSDictionary(contentsOfFile: "/var/mobile/Library/Resign/signingd-check-state.plist"),
+              let lastCheck = dict["lastCheckTime"] as? Double, lastCheck > 0 else {
+            nextCheckText = "尚未检测"
+            return
+        }
+        let interval = Double(max(resignCheckInterval, 1)) * 3600.0
+        let next = Date(timeIntervalSince1970: lastCheck + interval)
+        if next <= Date() {
+            nextCheckText = "即将检测"
+            return
+        }
+        let f = DateFormatter()
+        f.dateFormat = "MM-dd HH:mm"
+        nextCheckText = f.string(from: next)
+    }
+
+}

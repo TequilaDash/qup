@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- repro-helper 按需 root 助手（rootful / Dopamine rootless 通用）
+
+         它只做两件事：以 root 复制文件、把描述文件写进
+         /var/Managed Preferences/mobile 并踢一下 profiled。
+         做完立刻退出，所以不需要 launchd、mach-service、网络、Keychain
+         这些常驻守护进程才用得上的权限。 -->
+
+    <!-- 平台二进制，绕过 AMFI 对非 App Store 签名的限制 -->
+    <key>platform-application</key>
+    <true/>
+
+    <!-- 不进沙箱容器，才能看到真实的 /var/Managed Preferences -->
+    <key>com.apple.private.security.no-container</key>
+    <true/>
+
+    <!-- 🔴🔴 v2.1.26：这里**绝对不能**加 com.apple.private.security.no-sandbox！
+         v2.1.25 曾误加，真机（iPhone XS / iOS 18.0 / Dopamine rootless）实锤回归：
+           · App 是沙箱进程，iOS 不允许沙箱进程 posix_spawn 一个声明 no-sandbox 的二进制
+             → posix_spawn 直接返回非 0 → App 侧「repro-helper 启动失败」。
+           · helper 是 install-profile / profiles-inventory / 工具菜单的唯一通道，
+             于是**连重签一起挂掉**（用户主诉：联网修复失败 + 重签也失败）。
+         roothide 包之所以能带 no-sandbox，是因为它的 App entitlements 里有
+         platform-application + no-container（见 entitlements-roothide.plist:62/65），
+         rootless/rootful 的 App entitlements 没有这两项 → 形态不同，不能照抄。
+         正确做法：helper 保持「可被沙箱 App 拉起」，需要无沙箱的 fix-cellular
+         改由 launchd 系统守护 repro-signingd（root、天然无沙箱）代拉 helper 执行
+         —— 与 SSH root 手动跑 helper 完全等价（真机实测 exit=0）。 -->
+
+    <!-- posix_spawn 调 /usr/bin/killall -HUP profiled -->
+    <key>com.apple.private.posix-spawn</key>
+    <true/>
+
+    <!-- 写入系统描述文件库 -->
+    <key>com.apple.private.storage-managedpreferences</key>
+    <true/>
+
+    <!-- 经 MCProfileConnection XPC 把描述文件注册进 profiled 的「本地 provisioning 库」
+         （注意：只给 profiled-access，绝不给 profiled.provisioningprofiles 数组授权）。
+         关键认知（v1.1.19 踩坑）：一旦带上 provisioningprofiles 数组（含 Installation
+         授权），profiled 会把 profile 注册进 **managed（MDM）库**，而 installd 的
+         AllowInstallLocalProvisioned 校验查的是「本地库」，两边不是一库 → 0xe8008015。
+         能正常工作的 rootless test源码 即只持 profiled-access（platform-application 同款），
+         调 MC 时 managingProfileIdentifier 传 nil，profile 落进本地库。本 helper 与之对齐。 -->
+    <key>com.apple.managedconfiguration.profiled-access</key>
+    <true/>
+
+    <!-- 修复当前插件联网（fix-cellular）：CoreTelephony 私有 C 函数需要 fine-grained 授权，
+         否则 _CTServerConnectionSetCellularUsagePolicy 全返回 2（CommCenter XPC 拒绝），
+         246/246 应用策略无法写入。补上后返回 0，用户实测开关可恢复联网。 -->
+    <key>com.apple.CommCenter.fine-grained</key>
+    <array>
+        <string>cellular-plan</string>
+        <string>data-usage</string>
+        <string>data-allowed</string>
+        <string>data-allowed-write</string>
+        <string>preferences-write</string>
+    </array>
+</dict>
+</plist>
