@@ -697,4 +697,3 @@ struct SwipeableRow<Content: View>: View {
                 }
             }
     }
-}
