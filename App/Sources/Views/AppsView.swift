@@ -370,7 +370,7 @@ struct AppsView: View {
 
     /// 各分区滑动动作（左滑露出）：卸载（v2.2.10 IC 通道）/ 清空数据 / 小黑屋增删
     /// 左滑（trailing）动作：卸载 / 清空数据
-    private func rowTrailingActions(app: InstalledApp, source: BlacklistSource) -> [SwipeActionItem] {
+    private func rowTrailingActions(app: InstalledApp) -> [SwipeActionItem] {
         return [
             SwipeActionItem(title: "卸载", icon: "trash", tint: .red, destructive: true) {
                 pendingUninstall = app
