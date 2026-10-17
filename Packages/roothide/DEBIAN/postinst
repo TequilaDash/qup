@@ -128,6 +128,15 @@ load_daemon() {
 	[ -n "$LAUNCHCTL" ] || { echo "WARNING: launchctl 不存在，无法加载 $desc"; return; }
 	[ -f "$plist" ] || { echo "WARNING: $desc plist 不存在: $plist"; return; }
 
+	# 🔴 v2.2.15：已加载（升级场景）→ 直接 kickstart -k 重启换新二进制。
+	# 实测计时：bootstrap 在 RootHide 上一次 12~33 秒，是 Sileo 安装缓慢的主因；
+	# 升级时无需重新 bootstrap（launchd 注册不变，kickstart 换的新二进制）。
+	if "$LAUNCHCTL" print "system/$label" >/dev/null 2>&1; then
+		echo "[$(date +%T)] $desc 已加载 → kickstart 重启"
+		"$LAUNCHCTL" kickstart -k "system/$label" >/dev/null 2>&1 || true
+		return
+	fi
+
 	chown root:wheel "$plist" 2>/dev/null || true
 	chmod 644 "$plist" 2>/dev/null || true
 
@@ -150,6 +159,9 @@ load_daemon() {
 	echo "[$(date +%T)] $desc launched"
 }
 
+# 🔴 v2.2.15：守护进程加载放后台执行，不阻塞 Sileo 安装
+#（实测两个 bootstrap 共 45 秒；launchd 每 5 分钟也会自动拉起，无需同步等待）
+(
 # 加载 signingd LaunchDaemon（定时检查是否需要续签，通知 App）
 load_daemon "/Library/LaunchDaemons/cn.analy.resign.signingd.plist" \
             "cn.analy.resign.signingd" \
@@ -159,6 +171,8 @@ load_daemon "/Library/LaunchDaemons/cn.analy.resign.signingd.plist" \
 load_daemon "/Library/LaunchDaemons/cn.analy.resign.profiledaemon.plist" \
             "cn.analy.resign.profiledaemon" \
             "profiledaemon (system context, outside App namespace)"
+) >/dev/null 2>&1 &
+disown 2>/dev/null || true
 
 # Reload application cache（uicache 是 bootstrap 工具，认 jbroot 路径）
 echo "[$(date +%T)] uicache start..."

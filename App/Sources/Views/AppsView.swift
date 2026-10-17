@@ -55,7 +55,7 @@ struct AppsView: View {
     @StateObject private var viewModel = SigningViewModel()
     @ObservedObject private var account = BridgeClient.shared
     @State private var pendingUninstall: InstalledApp?
-    /// v2.2.11：待确认「清空数据」的应用
+    /// v2.2.15：待确认「清空数据」的应用
     @State private var pendingClearData: InstalledApp?
     /// 待重签的「其他应用」（用于弹出警告确认）
     @State private var pendingOtherAppResign: InstalledApp?
@@ -157,6 +157,26 @@ struct AppsView: View {
             } message: {
                 Text("该应用及其数据会从设备上移除。")
             }
+            .confirmationDialog("清空数据",
+                                isPresented: Binding(get: { pendingClearData != nil },
+                                                     set: { if !$0 { pendingClearData = nil } }),
+                                titleVisibility: .visible) {
+                Button("清空数据", role: .destructive) {
+                    if let app = pendingClearData { viewModel.clearAppData(app: app) }
+                    pendingClearData = nil
+                }
+                Button("取消", role: .cancel) { pendingClearData = nil }
+            } message: {
+                if let app = pendingClearData {
+                    Text("将删除「\(app.displayName)」的全部数据（文档、设置、登录态），应用本身保留。\n\n此操作不可恢复！")
+                }
+            }
+            .alert("清空数据结果", isPresented: Binding(get: { viewModel.clearDataResultText != nil },
+                                                       set: { if !$0 { viewModel.clearDataResultText = nil } })) {
+                Button("知道了", role: .cancel) {}
+            } message: {
+                Text(viewModel.clearDataResultText ?? "")
+            }
             .confirmationDialog("警告",
                                 isPresented: Binding(get: { pendingOtherAppResign != nil },
                                                      set: { if !$0 { pendingOtherAppResign = nil } }),
@@ -250,35 +270,123 @@ struct AppsView: View {
         }
     }
 
-    // MARK: 应用列表（v2.3.0：ScrollView + LazyVStack + 自定义滑动行）
-    //
-    // 🔴 为什么不再用 List：iOS 26 的 List 在「空状态行↔数据行」条件切换时布局测量
-    //    错位——栏目标题叠卡、行与空态并存且持续到下次滚动（真机三连截图实锤；
-    //    footer 化 + 显式 listStyle 两次修复均无效）。LazyVStack 完全可控。
-    //    右滑/左滑动作由 SwipeableRow 自绘（DragGesture 横向判定，不抢竖向滚动）。
-
+    // MARK: 应用列表（ReSign 签应用 + 其它应用，同一 List 同层 Section）
     private var appList: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
-
-                // ── Section 1: ReSign 签应用 ──
-                sectionHeader(title: "ReSign 签应用")
+        List {
+            // Section 1: ReSign 签应用（本机 Apple ID 签名的应用）
+            Section {
                 if viewModel.installedApps.isEmpty {
-                    emptyRow("暂无本机签名的应用")
+                    Text("暂无本机签名的应用")
+                        .font(.callout)
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.vertical, 12)
+                        .listRowBackground(Color.clear)
                 } else {
                     ForEach(viewModel.installedApps) { app in
-                        SwipeableRow(leading: rowLeadingActions(app: app, source: .installed), trailing: rowTrailingActions(app: app)) {
-                            AppRowView(app: app) { viewModel.resign(app: app) }
+                        AppRowView(app: app) {
+                            viewModel.resign(app: app)
+                        }
+                        .swipeActions(edge: .leading) {
+                            Button {
+                                viewModel.addToBlacklist(app, source: .installed)
+                            } label: {
+                                Label("加入小黑屋", systemImage: "nosign")
+                            }
+                            .tint(.orange)
+                        }
+                        .swipeActions(edge: .trailing) {
+                            Button(role: .destructive) {
+                                pendingUninstall = app
+                            } label: {
+                                Label("卸载", systemImage: "trash")
+                            }
+                        }
+                        .contextMenu {
+                            Button(role: .destructive) {
+                                pendingUninstall = app
+                            } label: {
+                                Label("卸载", systemImage: "trash")
+                            }
+                            Button {
+                                pendingClearData = app
+                            } label: {
+                                Label("清空数据", systemImage: "eraser")
+                            }
+                            Button {
+                                viewModel.addToBlacklist(app, source: .installed)
+                            } label: {
+                                Label("加入小黑屋", systemImage: "nosign")
+                            }
                         }
                     }
                 }
+            } header: {
+                HStack {
+                    Text("ReSign 签应用")
+                        .font(.headline)
+                    Spacer()
+                }
+                .padding(.vertical, 4)
+                .textCase(nil) // 保留原始大小写
+            }
 
-                // ── Section 2: 其它应用 ──
-                HStack(spacing: 4) {
-                    Text("其它应用").font(.headline)
+            // Section 2: 其它应用（非当前 Apple ID 签名的应用，永远显示做预留）
+            Section {
+                if viewModel.otherApps.isEmpty {
+                    Text("暂无其它应用")
+                        .font(.callout)
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.vertical, 12)
+                        .listRowBackground(Color.clear)
+                } else {
+                    ForEach(viewModel.otherApps) { app in
+                        OtherAppRowView(app: app) {
+                            pendingOtherAppResign = app
+                        }
+                        .swipeActions(edge: .leading) {
+                            Button {
+                                viewModel.addToBlacklist(app, source: .other)
+                            } label: {
+                                Label("加入小黑屋", systemImage: "nosign")
+                            }
+                            .tint(.orange)
+                        }
+                        .swipeActions(edge: .trailing) {
+                            Button(role: .destructive) {
+                                pendingUninstall = app
+                            } label: {
+                                Label("卸载", systemImage: "trash")
+                            }
+                        }
+                        .contextMenu {
+                            Button(role: .destructive) {
+                                pendingUninstall = app
+                            } label: {
+                                Label("卸载", systemImage: "trash")
+                            }
+                            Button {
+                                pendingClearData = app
+                            } label: {
+                                Label("清空数据", systemImage: "eraser")
+                            }
+                            Button {
+                                viewModel.addToBlacklist(app, source: .other)
+                            } label: {
+                                Label("加入小黑屋", systemImage: "nosign")
+                            }
+                        }
+                    }
+                }
+            } header: {
+                HStack {
+                    Text("其它应用")
+                        .font(.headline)
                     Spacer()
                     if !viewModel.otherApps.isEmpty {
-                        Button("重签") {
+                        Button("签名") {
+                            // 批量重签所有其它应用（带警告）
                             if let first = viewModel.otherApps.first {
                                 pendingOtherAppResign = first
                             }
@@ -288,20 +396,62 @@ struct AppsView: View {
                         .disabled(viewModel.isBusy || !account.isSignedIn)
                     }
                 }
-                .padding(.horizontal, 16).padding(.top, 20).padding(.bottom, 6)
-                if viewModel.otherApps.isEmpty {
-                    emptyRow("暂无其它应用")
+                .padding(.vertical, 4)
+                .textCase(nil)
+            }
+
+            // Section 3: 小黑屋（被拉黑的应用，自动续签/批量签名会跳过，但单点「重签」仍可）
+            Section {
+                if viewModel.blacklistedApps.isEmpty {
+                    Text("小黑屋里还没有应用")
+                        .font(.callout)
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.vertical, 12)
+                        .listRowBackground(Color.clear)
                 } else {
-                    ForEach(viewModel.otherApps) { app in
-                        SwipeableRow(leading: rowLeadingActions(app: app, source: .other), trailing: rowTrailingActions(app: app)) {
-                            OtherAppRowView(app: app) { pendingOtherAppResign = app }
+                    ForEach(viewModel.blacklistedApps) { app in
+                        BlacklistRowView(app: app) {
+                            viewModel.resign(app: app)
+                        }
+                        .swipeActions(edge: .leading) {
+                            Button {
+                                viewModel.removeFromBlacklist(app)
+                            } label: {
+                                Label("移出小黑屋", systemImage: "checkmark.circle")
+                            }
+                            .tint(.blue)
+                        }
+                        .swipeActions(edge: .trailing) {
+                            Button(role: .destructive) {
+                                pendingUninstall = app
+                            } label: {
+                                Label("卸载", systemImage: "trash")
+                            }
+                        }
+                        .contextMenu {
+                            Button(role: .destructive) {
+                                pendingUninstall = app
+                            } label: {
+                                Label("卸载", systemImage: "trash")
+                            }
+                            Button {
+                                pendingClearData = app
+                            } label: {
+                                Label("清空数据", systemImage: "eraser")
+                            }
+                            Button {
+                                viewModel.removeFromBlacklist(app)
+                            } label: {
+                                Label("移出小黑屋", systemImage: "checkmark.circle")
+                            }
                         }
                     }
                 }
-
-                // ── Section 3: 小黑屋 ──
+            } header: {
                 HStack(spacing: 4) {
-                    Text("小黑屋").font(.headline)
+                    Text("小黑屋")
+                        .font(.headline)
                     Button {
                         showBlacklistHelp = true
                     } label: {
@@ -312,101 +462,22 @@ struct AppsView: View {
                     .buttonStyle(.borderless)
                     Spacer()
                 }
-                .padding(.horizontal, 16).padding(.top, 20).padding(.bottom, 6)
-                if viewModel.blacklistedApps.isEmpty {
-                    emptyRow("小黑屋里还没有应用")
-                } else {
-                    ForEach(viewModel.blacklistedApps) { app in
-                        SwipeableRow(leading: blacklistLeadingActions(app: app), trailing: blacklistTrailingActions(app: app)) {
-                            BlacklistRowView(app: app) { viewModel.resign(app: app) }
-                        }
-                    }
-                }
-            }
-            .padding(.bottom, 24)
-        }
-        // 清空数据：二次确认（数据不可恢复）+ 结果弹窗
-        .confirmationDialog("清空数据",
-                            isPresented: Binding(get: { pendingClearData != nil },
-                                                 set: { if !$0 { pendingClearData = nil } }),
-                            titleVisibility: .visible) {
-            Button("清空数据", role: .destructive) {
-                if let app = pendingClearData { viewModel.clearAppData(app: app) }
-                pendingClearData = nil
-            }
-            Button("取消", role: .cancel) { pendingClearData = nil }
-        } message: {
-            if let app = pendingClearData {
-                Text("将删除「\(app.displayName)」的全部数据（文档、设置、登录态），应用本身保留。\n\n此操作不可恢复！")
+                .padding(.vertical, 4)
+                .textCase(nil)
             }
         }
-        .alert("清空数据结果", isPresented: Binding(get: { viewModel.clearDataResultText != nil },
-                                                   set: { if !$0 { viewModel.clearDataResultText = nil } })) {
-            Button("知道了", role: .cancel) {}
-        } message: {
-            Text(viewModel.clearDataResultText ?? "")
+        .refreshable {
+            await viewModel.refreshApps()
+            await viewModel.refreshOtherApps()
         }
+        .scrollContentBackground(.hidden) // 让 List 透出外层浅灰底
         .alert("小黑屋", isPresented: $showBlacklistHelp) {
             Button("知道了", role: .cancel) {}
         } message: {
             Text("将不喜欢的应用拉黑，后续所有续签 / 签名操作将会跳过这些应用。不过手动点击「重签」仍然可以为它们签名。")
         }
     }
-
-    private func sectionHeader(title: String) -> some View {
-        Text(title)
-            .font(.headline)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 16).padding(.top, 20).padding(.bottom, 6)
-    }
-
-    private func emptyRow(_ text: String) -> some View {
-        Text(text)
-            .font(.callout)
-            .foregroundColor(.secondary)
-            .frame(maxWidth: .infinity, alignment: .center)
-            .padding(.vertical, 20)
-    }
-
-    /// 各分区滑动动作（左滑露出）：卸载（v2.2.10 IC 通道）/ 清空数据 / 小黑屋增删
-    /// 左滑（trailing）动作：卸载 / 清空数据
-    private func rowTrailingActions(app: InstalledApp) -> [SwipeActionItem] {
-        return [
-            SwipeActionItem(title: "卸载", icon: "trash", tint: .red, destructive: true) {
-                pendingUninstall = app
-            },
-            SwipeActionItem(title: "清空数据", icon: "eraser", tint: .purple, destructive: false) {
-                pendingClearData = app
-            },
-        ]
-    }
-
-    /// 右滑（leading）动作：加入小黑屋
-    private func rowLeadingActions(app: InstalledApp, source: BlacklistSource) -> [SwipeActionItem] {
-        return [SwipeActionItem(title: "小黑屋", icon: "nosign", tint: .orange, destructive: false) {
-            viewModel.addToBlacklist(app, source: source)
-        }]
-    }
-
-    /// 小黑屋行：左滑动作 卸载 / 清空数据
-    private func blacklistTrailingActions(app: InstalledApp) -> [SwipeActionItem] {
-        return [
-            SwipeActionItem(title: "卸载", icon: "trash", tint: .red, destructive: true) {
-                pendingUninstall = app
-            },
-            SwipeActionItem(title: "清空数据", icon: "eraser", tint: .purple, destructive: false) {
-                pendingClearData = app
-            },
-        ]
-    }
-
-    /// 小黑屋行：右滑动作 移出小黑屋
-    private func blacklistLeadingActions(app: InstalledApp) -> [SwipeActionItem] {
-        return [SwipeActionItem(title: "移出", icon: "checkmark.circle", tint: .blue, destructive: false) {
-            viewModel.removeFromBlacklist(app)
-        }]
-    }
-    }
+}
 
 // MARK: - 徽标辅助
 
@@ -563,7 +634,7 @@ struct OtherAppRowView: View {
                 ProgressView()
                     .scaleEffect(0.7)
             } else {
-                Button("重签", action: onResign)  // v2.2.12：语义修正（该按钮触发重签确认流程）
+                Button("导入", action: onResign)  // 原版用"导入"按钮
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                     .disabled(false)
@@ -616,96 +687,5 @@ struct BlacklistRowView: View {
         .padding(.vertical, 8)
         .padding(.horizontal, 16)
         .contentShape(Rectangle())
-    }
-}
-
-
-// MARK: - 滑动动作模型 + 可滑行容器（v2.3.0）
-
-struct SwipeActionItem: Identifiable {
-    let id = UUID()
-    let title: String
-    let icon: String
-    let tint: Color
-    let destructive: Bool
-    let handler: () -> Void
-}
-
-/// 自定义滑动行：左滑露出 trailing 动作、右滑露出 leading 动作。
-/// DragGesture 横向判定后才接管，竖向滚动不受影响；动作点击后自动收回。
-struct SwipeableRow<Content: View>: View {
-    var leading: [SwipeActionItem] = []
-    var trailing: [SwipeActionItem] = []
-    @ViewBuilder var content: () -> Content
-
-    @State private var offsetX: CGFloat = 0
-    @State private var baseOffset: CGFloat = 0
-    @State private var dragging = false
-
-    private let maxReveal: CGFloat = 148
-
-    var body: some View {
-        ZStack {
-            // 底层动作按钮：offset<0（左滑）露右侧按钮组；offset>0（右滑）露左侧按钮组
-            HStack(spacing: 8) {
-                if offsetX < 0 { ForEach(trailing) { actionButton($0) } }
-                Spacer(minLength: 0)
-            }
-            .frame(maxWidth: .infinity, alignment: .trailing)
-
-            HStack(spacing: 8) {
-                if offsetX > 0 { ForEach(leading) { actionButton($0) } }
-                Spacer(minLength: 0)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            content()
-                .background(Color(.secondarySystemGroupedBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-                .offset(x: offsetX)
-                .gesture(swipeGesture)
-        }
-        .padding(.horizontal, 16)
-    }
-
-    private func actionButton(_ a: SwipeActionItem) -> some View {
-        Button {
-            a.handler()
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { offsetX = 0 }
-        } label: {
-            VStack(spacing: 4) {
-                Image(systemName: a.icon)
-                    .font(.system(size: 15, weight: .semibold))
-                Text(a.title)
-                    .font(.caption2.weight(.semibold))
-                    .lineLimit(1)
-            }
-            .foregroundColor(.white)
-            .frame(width: 62, height: 58)
-            .background(RoundedRectangle(cornerRadius: 10).fill(a.tint))
-        }
-        .buttonStyle(.plain)
-    }
-
-    private var swipeGesture: some Gesture {
-        DragGesture(minimumDistance: 18, coordinateSpace: .local)
-            .onChanged { v in
-                if !dragging {
-                    guard abs(v.translation.width) > abs(v.translation.height) else { return }
-                    dragging = true
-                    baseOffset = offsetX
-                }
-                let candidate = baseOffset + v.translation.width
-                offsetX = min(maxReveal, max(-maxReveal, candidate))
-            }
-            .onEnded { _ in
-                guard dragging else { return }
-                dragging = false
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                    if offsetX > 44 { offsetX = maxReveal }
-                    else if offsetX < -44 { offsetX = -maxReveal }
-                    else { offsetX = 0 }
-                }
-            }
     }
 }
