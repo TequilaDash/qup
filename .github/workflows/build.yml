@@ -1,15 +1,10 @@
 name: Build ReSign
 
+# 🔴 构建与发版分离（用户规矩：发版必须复用已验证产物，绝不重复构建）：
+#   - 本 workflow = 验证构建（仅手动触发），deb 产物上传为 artifact 保存 90 天
+#   - tag + Release = release.yml（输入已验证 run_id，直接下载 artifact 发版）
 on:
-  push:
-    tags:
-      - 'v*'
-  workflow_dispatch:
-    inputs:
-      tag_name:
-        description: 'Release tag name（手动触发专用；留空则用分支名）'
-        required: false
-        default: ''
+  workflow_dispatch: {}
 
 # 🔴 v2.1.0：同一 tag force push 会堆积多个排队 run（互相干扰、浪费名额）。
 # concurrency：同 ref 只保留最新，旧 run 自动取消。
@@ -36,6 +31,13 @@ jobs:
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: latest
+
+      - name: "Diagnostic: 工具链版本（Xcode / Swift）"
+        run: |
+          xcodebuild -version
+          swiftc --version
+          echo "=== 工程语言模式（project.pbxproj）==="
+          grep -E "SWIFT_VERSION|SWIFT_DEFAULT_ACTOR_ISOLATION|SWIFT_APPROACHABLE_CONCURRENCY" RePro.xcodeproj/project.pbxproj | sort -u
 
       - name: Install dependencies
         run: |
@@ -452,23 +454,13 @@ jobs:
       # 否则手动触发（tag_name 留空）会用 github.ref_name=roothide 建出一个名为
       # "roothide" 的垃圾 release + 同名 tag，与分支名撞成歧义 ref。
       # 有了这条 if，就可以先 dispatch 一次纯编译验证，确认绿了再打正式 tag 发布。
-      - name: Create Release
-        if: startsWith(github.ref, 'refs/tags/') || inputs.tag_name != ''
-        uses: softprops/action-gh-release@v2
+      - name: Upload deb artifacts（发版由 release.yml 复用此产物，绝不重复构建）
+        uses: actions/upload-artifact@v4
         with:
-          # 🔴 v2.1.0：手动触发（workflow_dispatch）时 github.ref_name=分支名 会建错 release，
-          # 用输入参数覆盖：dispatch 时传 tag_name，tag push 时用 github.ref_name。
-          tag_name: ${{ inputs.tag_name != '' && inputs.tag_name || github.ref_name }}
-          name: "ReSign ${{ inputs.tag_name != '' && inputs.tag_name || github.ref_name }}"
-          body: |
-            ## ReSign ${{ inputs.tag_name != '' && inputs.tag_name || github.ref_name }}
-            ### 安装包
-            | 包 | 适用环境 |
-            |---|---|
-            | `*_roothide-iphoneos-arm64.deb` | **RootHide 用户安装此包** |
-          files: CydiaPackages/*.deb
-          draft: false
-          prerelease: false
+          name: debs-${{ github.run_id }}
+          path: CydiaPackages/*.deb
+          retention-days: 90
+          if-no-files-found: error
 
       # 🔴 诊断通道：本机网络对 results-receiver.actions.githubusercontent.com 做 SNI 干扰，
       # CI run 日志下载全部 421 拿不到。失败时把构建错误发成 issue，经 api.github.com 读取。
