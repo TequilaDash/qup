@@ -55,6 +55,10 @@
 #include <CommonCrypto/CommonDigest.h>
 #include <xpc/xpc.h>
 #import <Foundation/Foundation.h>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <mach-o/dyld.h>
+#include <limits.h>
 
 // 系统描述文件库的解析/去重/清单/删除，与 repro-helper 共用同一份实现
 #import "RPVProfileStore.h"
