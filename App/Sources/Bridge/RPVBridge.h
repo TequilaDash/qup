@@ -194,6 +194,12 @@ NS_SWIFT_SENDABLE
 - (BOOL)removeApplicationWithBundleIdentifier:(NSString *)bundleIdentifier
     NS_SWIFT_NAME(removeApplication(bundleIdentifier:));
 
+/// 🔴 v2.2.11：清空应用数据（repro-helper setuid root 代执行：定位数据容器并清空内容，
+/// 应用本身保留）。completion 在主队列回调；success=NO 时 message 含失败原因。
+- (void)clearAppDataForBundleIdentifier:(NSString *)bundleID
+                             completion:(void (^)(BOOL success, NSString *_Nullable message))completion
+    NS_SWIFT_NAME(clearAppData(bundleID:completion:));
+
 #pragma mark IPA 导入
 
 /// 解析并安装一个 .ipa（等价于原版「导入 → 详情页点 INSTALL」两步）

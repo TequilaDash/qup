@@ -325,6 +325,43 @@ static void RPVHelperFlushPreferences(void) {
 }
 
 
+/// 🔴 v2.2.11：清空应用数据——按 bundleID 定位数据容器并清空内容（保留容器目录与
+/// container metadata，应用本身不动）。root 无沙箱；返回 0=成功 1=失败。
+static int RPVHelperClearData(NSString *bundleID) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (bundleID.length == 0 || [bundleID isEqualToString:@"cn.analy.resign"]) {
+        fprintf(stderr, "[repro-helper] clear-data: 拒绝（bundleID 为空或指向 ReSign 自身）\n");
+        return 1;
+    }
+    NSString *root = @"/var/mobile/Containers/Data/Application";
+    NSString *container = nil;
+    NSArray *dirs = [fm contentsOfDirectoryAtPath:root error:nil];
+    for (NSString *d in dirs) {
+        if ([d hasPrefix:@"."]) continue;
+        NSString *meta = [[root stringByAppendingPathComponent:d]
+            stringByAppendingPathComponent:@".com.apple.mobile_container_manager.metadata.plist"];
+        NSDictionary *m = [NSDictionary dictionaryWithContentsOfFile:meta];
+        if (m && [m[@"MCMMetadataIdentifier"] isKindOfClass:[NSString class]] &&
+            [m[@"MCMMetadataIdentifier"] isEqualToString:bundleID]) {
+            container = [root stringByAppendingPathComponent:d];
+            break;
+        }
+    }
+    if (!container) {
+        fprintf(stderr, "[repro-helper] clear-data: 未找到 %s 的数据容器\n", bundleID.UTF8String);
+        return 1;
+    }
+    NSUInteger removed = 0;
+    NSArray *items = [fm contentsOfDirectoryAtPath:container error:nil];
+    for (NSString *item in items) {
+        if ([item isEqualToString:@".com.apple.mobile_container_manager.metadata.plist"]) continue;
+        if ([fm removeItemAtPath:[container stringByAppendingPathComponent:item] error:nil]) removed++;
+    }
+    NSLog(@"[repro-helper] clear-data: 已清空 %s 数据容器（删除 %lu 项）",
+          container.UTF8String, (unsigned long)removed);
+    return 0;
+}
+
 static int RPVHelperFixCellular(NSString *selfBid) {
     // 🔴 v1.1.146：只修复当前插件自身（App 侧传入 bundle id），不再枚举/批量修复其他应用。
     // 批量对系统守护/应用调 CoreTelephony 私有 C 函数会污染 CT 内部状态、在 roothide 下
@@ -881,6 +918,15 @@ int main(int argc, char *argv[]) {
             // argv[2] = 当前插件自身 bundle id（App 侧传入，v1.1.146 必传）
             NSString *selfBid = [NSString stringWithUTF8String:argv[2]];
             return RPVHelperFixCellular(selfBid);
+        }
+        // 🔴 v2.2.11：清空应用数据——定位数据容器并清空内容（应用保留，数据不可恢复）。
+        if ([command isEqualToString:@"clear-data"]) {
+            if (argc != 3) {   // clear-data <目标应用 bundle id>
+                RPVHelperPrintUsage();
+                return 64;
+            }
+            NSString *targetBid = [NSString stringWithUTF8String:argv[2]];
+            return RPVHelperClearData(targetBid);
         }
 
         // v1.1.181：系统状态页工具菜单用。reboot/userspace-reboot 来自 RebootTools，

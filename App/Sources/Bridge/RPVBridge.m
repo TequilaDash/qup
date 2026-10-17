@@ -631,6 +631,32 @@ static void RPVBridgeCallOnMain(dispatch_block_t block) {
     });
 }
 
+/// 🔴 v2.2.11：清空应用数据——拉起 setuid root 的 repro-helper clear-data，
+/// 定位数据容器并清空内容（应用本身保留）。同步阻塞，完成后主队列回调。
+- (void)clearAppDataForBundleIdentifier:(NSString *)bundleID
+                             completion:(void (^)(BOOL success, NSString *_Nullable message))completion {
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSString *helperPath = RPVResolvedRootHelperPath();
+        if (helperPath.length == 0) {
+            if (completion) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    completion(NO, @"未找到 repro-helper（root 助手），无法清空数据");
+                });
+            }
+            return;
+        }
+        BOOL ok = RPVRunRootHelper(helperPath, @[@"clear-data", bundleID ?: @""]);
+        NSString *message = ok
+            ? @"已清空该应用的数据"
+            : @"清空数据失败，请稍后重试。";
+        if (completion) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                completion(ok, message);
+            });
+        }
+    });
+}
+
 #pragma mark - RPVApplicationSigningProtocol
 
 - (void)applicationSigningDidStart {

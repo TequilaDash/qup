@@ -55,6 +55,8 @@ struct AppsView: View {
     @StateObject private var viewModel = SigningViewModel()
     @ObservedObject private var account = BridgeClient.shared
     @State private var pendingUninstall: InstalledApp?
+    /// v2.2.11：待确认「清空数据」的应用
+    @State private var pendingClearData: InstalledApp?
     /// 待重签的「其他应用」（用于弹出警告确认）
     @State private var pendingOtherAppResign: InstalledApp?
     /// 小黑屋说明弹窗
@@ -279,6 +281,12 @@ struct AppsView: View {
                             } label: {
                                 Label("卸载", systemImage: "trash")
                             }
+                            Button {
+                                pendingClearData = app
+                            } label: {
+                                Label("清空数据", systemImage: "eraser")
+                            }
+                            .tint(.purple)
                         }
                     }
                 }
@@ -313,6 +321,19 @@ struct AppsView: View {
                                 Label("加入小黑屋", systemImage: "nosign")
                             }
                             .tint(.orange)
+                        }
+                        .swipeActions(edge: .trailing) {
+                            Button(role: .destructive) {
+                                pendingUninstall = app
+                            } label: {
+                                Label("卸载", systemImage: "trash")
+                            }
+                            Button {
+                                pendingClearData = app
+                            } label: {
+                                Label("清空数据", systemImage: "eraser")
+                            }
+                            .tint(.purple)
                         }
                     }
                 }
@@ -359,6 +380,19 @@ struct AppsView: View {
                             }
                             .tint(.blue)
                         }
+                        .swipeActions(edge: .trailing) {
+                            Button(role: .destructive) {
+                                pendingUninstall = app
+                            } label: {
+                                Label("卸载", systemImage: "trash")
+                            }
+                            Button {
+                                pendingClearData = app
+                            } label: {
+                                Label("清空数据", systemImage: "eraser")
+                            }
+                            .tint(.purple)
+                        }
                     }
                 }
             } header: {
@@ -382,6 +416,27 @@ struct AppsView: View {
         .refreshable {
             await viewModel.refreshApps()
             await viewModel.refreshOtherApps()
+        }
+        // 🔴 v2.2.11：清空数据——二次确认（数据不可恢复）+ 结果弹窗
+        .confirmationDialog("清空数据",
+                            isPresented: Binding(get: { pendingClearData != nil },
+                                                 set: { if !$0 { pendingClearData = nil } }),
+                            titleVisibility: .visible) {
+            Button("清空数据", role: .destructive) {
+                if let app = pendingClearData { viewModel.clearAppData(app: app) }
+                pendingClearData = nil
+            }
+            Button("取消", role: .cancel) { pendingClearData = nil }
+        } message: {
+            if let app = pendingClearData {
+                Text("将删除「\(app.displayName)」的全部数据（文档、设置、登录态），应用本身保留。\n\n此操作不可恢复！")
+            }
+        }
+        .alert("清空数据结果", isPresented: Binding(get: { viewModel.clearDataResultText != nil },
+                                                   set: { if !$0 { viewModel.clearDataResultText = nil } })) {
+            Button("知道了", role: .cancel) {}
+        } message: {
+            Text(viewModel.clearDataResultText ?? "")
         }
         .scrollContentBackground(.hidden) // 让 List 透出外层浅灰底
         .alert("小黑屋", isPresented: $showBlacklistHelp) {

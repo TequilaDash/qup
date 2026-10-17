@@ -292,6 +292,13 @@ final class BridgeClient: ObservableObject {
         bridge.removeApplication(bundleIdentifier: bundleID)
     }
 
+    /// 🔴 v2.2.11：清空应用数据（helper setuid root 定位数据容器并清空内容，应用本身保留）。
+    func clearAppData(bundleID: String, completion: @escaping (Bool, String) -> Void) {
+        bridge.clearAppData(forBundleIdentifier: bundleID) { success, message in
+            completion(success, message ?? "")
+        }
+    }
+
     // MARK: - IPA 导入
 
     func importIPA(url: URL, completion: @escaping (Result<InstalledApp, Error>) -> Void) {

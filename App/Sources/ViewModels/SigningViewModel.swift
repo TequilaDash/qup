@@ -63,6 +63,25 @@ final class SigningViewModel: ObservableObject {
 
     // MARK: - 进度订阅
 
+    // MARK: - 清空数据（v2.2.11）
+
+    @Published var clearDataInFlight = false
+    @Published var clearDataResultText: String?
+
+    /// 清空应用数据：helper（setuid root）删除数据容器内容，应用本身保留。结果弹窗展示。
+    func clearAppData(app: InstalledApp) {
+        guard !clearDataInFlight else { return }
+        clearDataInFlight = true
+        LogManager.shared.info("清空数据: \(app.bundleIdentifier)", source: "SigningViewModel")
+        client.clearAppData(bundleID: app.bundleIdentifier) { [weak self] success, message in
+            guard let self = self else { return }
+            self.clearDataInFlight = false
+            LogManager.shared.info("清空数据结果: [\(success)] \(message)", source: "SigningViewModel")
+            self.clearDataResultText = message
+            Task { await self.refreshApps() }
+        }
+    }
+
     private func bindSigningCallbacks() {
         client.observeSigningProgress { [weak self] bundleID, progress in
             guard let self = self else { return }
