@@ -267,7 +267,7 @@ struct AppsView: View {
                     emptyRow("暂无本机签名的应用")
                 } else {
                     ForEach(viewModel.installedApps) { app in
-                        SwipeableRow(trailing: rowActions(app, source: .installed)) {
+                        SwipeableRow(trailing: rowActions(app: app, source: .installed)) {
                             AppRowView(app: app) { viewModel.resign(app: app) }
                         }
                     }
@@ -293,7 +293,7 @@ struct AppsView: View {
                     emptyRow("暂无其它应用")
                 } else {
                     ForEach(viewModel.otherApps) { app in
-                        SwipeableRow(trailing: rowActions(app, source: .other)) {
+                        SwipeableRow(trailing: rowActions(app: app, source: .other)) {
                             OtherAppRowView(app: app) { pendingOtherAppResign = app }
                         }
                     }
@@ -317,7 +317,7 @@ struct AppsView: View {
                     emptyRow("小黑屋里还没有应用")
                 } else {
                     ForEach(viewModel.blacklistedApps) { app in
-                        SwipeableRow(trailing: rowActions(app, source: .blacklist)) {
+                        SwipeableRow(trailing: blacklistRowActions(app: app)) {
                             BlacklistRowView(app: app) { viewModel.resign(app: app) }
                         }
                     }
@@ -387,12 +387,23 @@ struct AppsView: View {
             items.append(SwipeActionItem(title: "小黑屋", icon: "nosign", tint: .orange, destructive: false) {
                 viewModel.addToBlacklist(app, source: .other)
             })
-        case .blacklist:
-            items.append(SwipeActionItem(title: "移出", icon: "checkmark.circle", tint: .blue, destructive: false) {
-                viewModel.removeFromBlacklist(app)
-            })
         }
         return items
+    }
+
+    /// 小黑屋行的滑动动作（左滑露出）：卸载 / 清空数据 / 移出小黑屋
+    private func blacklistRowActions(app: InstalledApp) -> [SwipeActionItem] {
+        return [
+            SwipeActionItem(title: "卸载", icon: "trash", tint: .red, destructive: true) {
+                pendingUninstall = app
+            },
+            SwipeActionItem(title: "清空数据", icon: "eraser", tint: .purple, destructive: false) {
+                pendingClearData = app
+            },
+            SwipeActionItem(title: "移出", icon: "checkmark.circle", tint: .blue, destructive: false) {
+                viewModel.removeFromBlacklist(app)
+            },
+        ]
     }
     }
 
