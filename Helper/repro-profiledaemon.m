@@ -271,6 +271,25 @@ static void PDWriteToolResult(NSString *reqId, NSString *status, NSString *detai
     chown(kToolResPath.fileSystemRepresentation, 501, 501);
 }
 
+/// 🔴 v2.2.19：解析 daemon 自身真实根（<真实根>/usr/libexec/repro-profiledaemon）。
+static NSString *PDResolveSelfRoot(void) {
+    static NSString *cached = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        char buf[PATH_MAX] = {0};
+        uint32_t size = (uint32_t)sizeof(buf);
+        if (_NSGetExecutablePath(buf, &size) != 0) return;
+        char resolved[PATH_MAX] = {0};
+        const char *use = realpath(buf, resolved) ? resolved : buf;
+        NSString *path = [NSString stringWithUTF8String:use];
+        NSString *root = path.stringByDeletingLastPathComponent
+                             .stringByDeletingLastPathComponent
+                             .stringByDeletingLastPathComponent;
+        if (root.length > 0) cached = [root copy];
+    });
+    return cached;
+}
+
 /// 🔴 v2.2.19：kickstart lsd（图标缓存刷新）——与 helper 的 RPVHelperKickstartLSD 同逻辑。
 static int PDKickstartLSD(void) {
     NSString *root = PDResolveSelfRoot();
