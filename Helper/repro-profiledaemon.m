@@ -271,6 +271,49 @@ static void PDWriteToolResult(NSString *reqId, NSString *status, NSString *detai
     chown(kToolResPath.fileSystemRepresentation, 501, 501);
 }
 
+/// 🔴 v2.2.19：kickstart lsd（图标缓存刷新）——与 helper 的 RPVHelperKickstartLSD 同逻辑。
+static int PDKickstartLSD(void) {
+    NSString *root = PDResolveSelfRoot();
+    if (root.length == 0) return 2;
+    NSString *launchctl = [root stringByAppendingPathComponent:@"usr/bin/launchctl"];
+    if (![[NSFileManager defaultManager] isExecutableFileAtPath:launchctl]) return 2;
+    int result = 1;
+    for (NSString *target in @[@"user/foreground/com.apple.lsd",
+                               @"user/501/com.apple.lsd",
+                               @"system/com.apple.lsd"]) {
+        const char *lc = [launchctl fileSystemRepresentation];
+        const char *tg = [target UTF8String];
+        const char *args[] = { lc, "kickstart", tg, NULL };
+        pid_t pid = 0;
+        if (posix_spawn(&pid, lc, NULL, NULL, (char *const *)args, NULL) == 0) {
+            int status = 0; waitpid(pid, &status, 0);
+            if (WIFEXITED(status) && WEXITSTATUS(status) == 0) { result = 0; break; }
+        }
+    }
+    return result;
+}
+
+/// 🔴 v2.2.19：respring（与 helper 的 RPVHelperKillSpringBoard 同逻辑：sysctl 枚举进程 kill）。
+static void PDRespring(void) {
+    int maxArgumentSize = 0;
+    size_t size = sizeof(maxArgumentSize);
+    if (sysctl((int[]){ CTL_KERN, KERN_ARGMAX }, 2, &maxArgumentSize, &size, NULL, 0) == -1) {
+        maxArgumentSize = 4096;
+    }
+    int mib[3] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL };
+    struct kinfo_proc *info = NULL;
+    size_t length = 0;
+    if (sysctl(mib, 3, NULL, &length, NULL, 0) < 0) return;
+    if (!(info = malloc(length))) return;
+    if (sysctl(mib, 3, info, &length, NULL, 0) < 0) { free(info); return; }
+    for (size_t i = 0; i < length / sizeof(struct kinfo_proc); i++) {
+        if (strcmp(info[i].kp_proc.p_comm, "SpringBoard") == 0) {
+            kill(info[i].kp_proc.p_pid, SIGTERM);
+        }
+    }
+    free(info);
+}
+
 /// 🔴 v2.2.16：工具请求——真实命名空间代执行
 /// action = uicache-all / uicache-app(带 bundlePath) / stage-import(带 paths)
 static void HandleToolRequest(void) {
@@ -313,6 +356,12 @@ static void HandleToolRequest(void) {
             code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
         }
         posix_spawn_file_actions_destroy(&actions);
+        if (code == 0) {
+            // 🔴 v2.2.19：uicache 成功后刷 lsd + respring（与 helper 原流程一致）
+            PDKickstartLSD();
+            sleep(1);
+            PDRespring();
+        }
         PDWriteToolResult(reqId, code == 0 ? @"success" : @"failed",
                           [NSString stringWithFormat:@"uicache exit=%d", code]);
         return;

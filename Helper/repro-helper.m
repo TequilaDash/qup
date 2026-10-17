@@ -770,21 +770,8 @@ static int RPVHelperRebuildIconCache(NSString *bundlePath) {
                 int st = 0; waitpid(p2, &st, 0);
             }
         }
-        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:45];
-        NSDictionary *res = nil;
-        while ([NSDate date] < deadline) {
-            [NSThread sleepForTimeInterval:0.5];
-            res = [NSDictionary dictionaryWithContentsOfFile:resPath];
-            if (res && [res[@"requestId"] isEqualToString:req[@"requestId"]]) break;
-            res = nil;
-        }
-        if (!res || ![res[@"status"] isEqualToString:@"success"]) {
-            RPVHelperLog(@"rebuild-icon-cache: profiledaemon 代执行失败（%@）",
-                         res[@"detail"] ?: @"超时");
-            return 1;
-        }
-        RPVHelperLog(@"rebuild-icon-cache: profiledaemon 代执行成功");
-        // 继续下方 lsd 重启 + respring
+        // 🔴 v2.2.19：不同步等待（App 主线程曾因此卡死 45 秒）——
+        // profiledaemon 异步完成 uicache + lsd 重启 + respring 全流程
     }
     BOOL single = (bundlePath.length > 0);
     RPVHelperLog(@"rebuild-icon-cache: 开始（uicache %@ → kickstart lsd → respring）",
