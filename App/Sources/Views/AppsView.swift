@@ -395,7 +395,6 @@ struct AppsView: View {
         return items
     }
     }
-}
 
 // MARK: - 徽标辅助
 
@@ -697,3 +696,4 @@ struct SwipeableRow<Content: View>: View {
                 }
             }
     }
+}
