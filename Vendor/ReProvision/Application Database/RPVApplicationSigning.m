@@ -46,8 +46,10 @@
    安装侧：LS 安装返回 NSOSStatusErrorDomain/-4 → 回退 InstallCoordination（IXAppInstallCoordinator）。
    卸载侧（iOS 26.0.1 真机实锤，bundleID=com.roooot.lara.U82B5LN29B）：
    LS uninstallApplication:withOptions: 直接返回 NO（被 stub），导致用户主动「卸载应用」弹窗提示失败。
-   Uninstall 没有 InstallCoordination 等价入口，故回退到 MobileInstallation.framework 的
-   MobileInstallationUninstall（对称 daemon 安装侧 MobileInstallationInstall 的 dlsym 模式）。
+   v2.2.10：卸载通道实锤——InstallCoordination 有 +[IXAppInstallCoordinator
+   uninstallAppWithBundleID:error:]（iOS 18.2 反编译转储；与安装同框架同权限，v2.2.8 已给
+   roothide 线补上该权限），App 侧即可卸载，无需 daemon。回退链统一为：
+   LS → (iOS>=26) InstallCoordination → MobileInstallationUninstall（多数固件被 strip，兜底）。
    非 iOS 26 一律保持原 LS 行为不变。 */
 
 /// 系统主版本号（用于「>iOS18版本 切换方案」的版本门控）。
@@ -183,6 +185,41 @@ static BOOL RPVUninstallWithMobileInstallation(NSString *bundleIdentifier, NSErr
     if (!ok && outError) *outError = [NSError errorWithDomain:@"RPVUninstallMobileInstallation" code:-4
                                                      userInfo:@{NSLocalizedDescriptionKey: errMsg ?: @"未知错误"}];
     return ok;
+}
+
+/// 「>iOS18版本 切换方案」v2.2.10：iOS 26 卸载主通道——InstallCoordination
+/// +[IXAppInstallCoordinator uninstallAppWithBundleID:error:]（iOS 18.2 反编译转储实锤，
+/// 与安装 _beginInstallForURL: 同框架同权限；App 侧 IC 通道 v2.2.8 起真机可用）。
+/// LS 卸载已被 stub、MobileInstallationUninstall 符号被 strip，此为唯一存活入口。
+/// 框架/类/选择器缺失或返回 NO 均带错误返回，调用方继续后续回退。
+static BOOL RPVUninstallWithInstallCoordination(NSString *bundleIdentifier, NSError **outError) {
+    if (outError) *outError = nil;
+    static void *installCoordinationHandle = NULL;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        installCoordinationHandle = dlopen("/System/Library/PrivateFrameworks/InstallCoordination.framework/InstallCoordination", RTLD_LAZY | RTLD_LOCAL);
+    });
+    if (installCoordinationHandle == NULL) {
+        if (outError) *outError = [NSError errorWithDomain:@"RPVUninstallInstallCoordination" code:-1
+                                                  userInfo:@{NSLocalizedDescriptionKey: @"InstallCoordination 框架加载失败"}];
+        return NO;
+    }
+    Class coordinatorClass = objc_getClass("IXAppInstallCoordinator");
+    SEL sel = sel_registerName("uninstallAppWithBundleID:error:");
+    if (coordinatorClass == Nil || ![(id)coordinatorClass respondsToSelector:sel]) {
+        if (outError) *outError = [NSError errorWithDomain:@"RPVUninstallInstallCoordination" code:-2
+                                                  userInfo:@{NSLocalizedDescriptionKey: @"IXAppInstallCoordinator uninstallAppWithBundleID:error: 在本系统不可用"}];
+        return NO;
+    }
+    @try {
+        BOOL ok = ((BOOL (*)(id, SEL, NSString *, NSError **))objc_msgSend)(
+            coordinatorClass, sel, bundleIdentifier, outError);
+        return ok;
+    } @catch (NSException *exception) {
+        if (outError) *outError = [NSError errorWithDomain:@"RPVUninstallInstallCoordination" code:1
+                                                  userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"IC 卸载抛出异常：%@", exception.reason ?: exception.name]}];
+        return NO;
+    }
 }
 
 
@@ -696,6 +733,13 @@ static BOOL (^_rpvDaemonProfileInstallHandler)(NSString *profilePath) = nil;
                               @"「>iOS18版本 切换方案」安装重试前卸载 bundleID=%@ → LS 返回 %@ (iOS major=%ld)",
                               bundleIdentifier, uninstalled ? @"YES" : @"NO", (long)RPVSystemMajorVersion());
                 if (!uninstalled && RPVSystemMajorVersion() >= 26) {
+                    NSError *icErr = nil;
+                    uninstalled = RPVUninstallWithInstallCoordination(bundleIdentifier, &icErr);
+                    RPVDiagnostic(uninstalled ? RPVDiagInfo : RPVDiagError, @"uninstall",
+                                  @"「>iOS18版本 切换方案」安装重试前卸载 回退 InstallCoordination → %@ (err=%@)",
+                                  uninstalled ? @"YES" : @"NO", icErr ? icErr.localizedDescription : @"nil");
+                }
+                if (!uninstalled && RPVSystemMajorVersion() >= 26) {
                     NSError *miErr = nil;
                     uninstalled = RPVUninstallWithMobileInstallation(bundleIdentifier, &miErr);
                     RPVDiagnostic(uninstalled ? RPVDiagInfo : RPVDiagError, @"uninstall",
@@ -1008,7 +1052,14 @@ static BOOL (^_rpvDaemonProfileInstallHandler)(NSString *profilePath) = nil;
         RPVDiagnostic(ret ? RPVDiagInfo : RPVDiagError, @"uninstall",
                       @"「>iOS18版本 切换方案」removeApplication bundleID=%@ → LS 返回 %@ (iOS major=%ld)",
                       bundleIdentifier, ret ? @"YES" : @"NO", (long)RPVSystemMajorVersion());
-        // 「>iOS18版本 切换方案」：iOS 26 LS 卸载被 stub（恒定返回 NO），回退 MobileInstallationUninstall。
+        // 「>iOS18版本 切换方案」：iOS 26 LS 卸载被 stub（恒定返回 NO），先回退 InstallCoordination（v2.2.10），再 MobileInstallationUninstall。
+        if (!ret && RPVSystemMajorVersion() >= 26) {
+            NSError *icErr = nil;
+            ret = RPVUninstallWithInstallCoordination(bundleIdentifier, &icErr);
+            RPVDiagnostic(ret ? RPVDiagInfo : RPVDiagError, @"uninstall",
+                          @"「>iOS18版本 切换方案」removeApplication 回退 InstallCoordination → %@ (err=%@)",
+                          ret ? @"YES" : @"NO", icErr ? icErr.localizedDescription : @"nil");
+        }
         if (!ret && RPVSystemMajorVersion() >= 26) {
             NSError *miErr = nil;
             ret = RPVUninstallWithMobileInstallation(bundleIdentifier, &miErr);
@@ -1029,6 +1080,13 @@ static BOOL (^_rpvDaemonProfileInstallHandler)(NSString *profilePath) = nil;
         RPVDiagnostic(ok ? RPVDiagInfo : RPVDiagError, @"uninstall",
                       @"「>iOS18版本 切换方案」_appShouldBeRemoved bundleID=%@ → LS 返回 %@ (iOS major=%ld)",
                       bundleIdentifier, ok ? @"YES" : @"NO", (long)RPVSystemMajorVersion());
+        if (!ok && RPVSystemMajorVersion() >= 26) {
+            NSError *icErr = nil;
+            ok = RPVUninstallWithInstallCoordination(bundleIdentifier, &icErr);
+            RPVDiagnostic(ok ? RPVDiagInfo : RPVDiagError, @"uninstall",
+                          @"「>iOS18版本 切换方案」_appShouldBeRemoved 回退 InstallCoordination → %@ (err=%@)",
+                          ok ? @"YES" : @"NO", icErr ? icErr.localizedDescription : @"nil");
+        }
         if (!ok && RPVSystemMajorVersion() >= 26) {
             NSError *miErr = nil;
             ok = RPVUninstallWithMobileInstallation(bundleIdentifier, &miErr);
