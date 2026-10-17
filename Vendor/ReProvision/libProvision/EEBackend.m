@@ -134,7 +134,7 @@ static void RZLogInstallCriticalInfoPlistKeys(NSString *bundlePath) {
                       @"Info.plist UIRequiredDeviceCapabilities = %@%@", caps,
                       suspicious ? @"（含 arm64e —— 非 Apple 标准取值，留意 installd 是否因此拒绝）" : @"");
     }
-    RPVDiagnostic(RPVDiagInfo, @"sign", @"Info.plist MinimumOSVersion=%@ CFBundleIdentifier=%@",
+    RPVDiagnostic(RPVDiagDebug, @"sign", @"Info.plist MinimumOSVersion=%@ CFBundleIdentifier=%@",
                   info[@"MinimumOSVersion"] ?: @"(none)", info[@"CFBundleIdentifier"] ?: @"(none)");
 }
 
@@ -193,7 +193,7 @@ static void RZInspectArchsInBundle(NSString *bundlePath) {
         if (!RZFileLooksLikeMachO(path)) continue;
         NSString *archs = RZDescribeArchs(path);
         if (archs) {
-            RPVDiagnostic(RPVDiagInfo, @"sign", @"重签前指纹 %@ : %@", [path lastPathComponent], archs);
+            RPVDiagnostic(RPVDiagDebug, @"sign", @"重签前指纹 %@ : %@", [path lastPathComponent], archs);
             count++;
         }
     }
@@ -410,13 +410,13 @@ static void RZDumpProfileMatch(NSString *bundlePath, NSString *entitlementsPath)
     NSFileManager *fm = [NSFileManager defaultManager];
     NSString *mainProv = [bundlePath stringByAppendingPathComponent:@"embedded.mobileprovision"];
 
-    RPVDiagnostic(RPVDiagInfo, @"sign", @"=== PROFILE MATCH DIAGNOSTICS (0xe8008015 root cause) ===");
+    RPVDiagnostic(RPVDiagDebug, @"sign", @"=== PROFILE MATCH DIAGNOSTICS (0xe8008015 root cause) ===");
 
     NSDictionary *prof = RZExtractProfilePlist(mainProv);
     if (!prof) {
         RPVDiagnostic(RPVDiagError, @"sign", @"! cannot parse embedded.mobileprovision (present=%@) — cannot verify profile match",
                       [fm fileExistsAtPath:mainProv] ? @"yes" : @"NO");
-        RPVDiagnostic(RPVDiagInfo, @"sign", @"=== end PROFILE MATCH DIAGNOSTICS ===");
+        RPVDiagnostic(RPVDiagDebug, @"sign", @"=== end PROFILE MATCH DIAGNOSTICS ===");
         return;
     }
     NSDictionary *pe = prof[@"Entitlements"];
@@ -425,15 +425,15 @@ static void RZDumpProfileMatch(NSString *bundlePath, NSString *entitlementsPath)
     NSArray *devs = prof[@"ProvisionedDevices"];
     NSString *exp = [prof[@"ExpirationDate"] description] ?: @"(unknown)";
 
-    RPVDiagnostic(RPVDiagInfo, @"sign", @"profile.application-identifier = %@", aid);
-    RPVDiagnostic(RPVDiagInfo, @"sign", @"profile.TeamIdentifier = %@", teams.firstObject);
-    RPVDiagnostic(RPVDiagInfo, @"sign", @"profile.ProvisionedDevices count = %lu（0=通配/团队描述文件，否则须包含本机 UDID）",
+    RPVDiagnostic(RPVDiagDebug, @"sign", @"profile.application-identifier = %@", aid);
+    RPVDiagnostic(RPVDiagDebug, @"sign", @"profile.TeamIdentifier = %@", teams.firstObject);
+    RPVDiagnostic(RPVDiagDebug, @"sign", @"profile.ProvisionedDevices count = %lu（0=通配/团队描述文件，否则须包含本机 UDID）",
                   (unsigned long)(devs ? devs.count : 0));
-    RPVDiagnostic(RPVDiagInfo, @"sign", @"profile.ExpirationDate = %@", exp);
+    RPVDiagnostic(RPVDiagDebug, @"sign", @"profile.ExpirationDate = %@", exp);
 
     NSDictionary *ent = [NSDictionary dictionaryWithContentsOfFile:entitlementsPath];
     NSString *eaid = ent[@"application-identifier"];
-    RPVDiagnostic(RPVDiagInfo, @"sign", @"signed entitlements.application-identifier = %@", eaid);
+    RPVDiagnostic(RPVDiagDebug, @"sign", @"signed entitlements.application-identifier = %@", eaid);
 
     // Wildcard-aware application-identifier match: profile "<Team>.*" matches
     // signed "<Team>.<bundleid>". Non-wildcard requires exact bundle id.
@@ -451,7 +451,7 @@ static void RZDumpProfileMatch(NSString *bundlePath, NSString *entitlementsPath)
             aidMatch = teamOK && bundleOK;
         }
     }
-    RPVDiagnostic(aidMatch ? RPVDiagInfo : RPVDiagError, @"sign",
+    RPVDiagnostic(aidMatch ? RPVDiagDebug : RPVDiagError, @"sign",
                   @"application-identifier MATCH = %@",
                   aidMatch ? @"YES" : @"NO (MISMATCH -> 0xe8008015)");
 
@@ -460,7 +460,7 @@ static void RZDumpProfileMatch(NSString *bundlePath, NSString *entitlementsPath)
     NSString *udid = udidRef ? (__bridge_transfer NSString *)udidRef : nil;
     if (udid.length) {
         BOOL inProfile = (devs.count == 0) ? YES : [devs containsObject:udid];
-        RPVDiagnostic(inProfile ? RPVDiagInfo : RPVDiagError, @"sign",
+        RPVDiagnostic(inProfile ? RPVDiagDebug : RPVDiagError, @"sign",
                       @"device UDID = %@ | in profile.ProvisionedDevices = %@",
                       udid, inProfile ? @"YES" : @"NO (NOT REGISTERED -> 0xe8008015)");
     } else {
@@ -478,11 +478,11 @@ static void RZDumpProfileMatch(NSString *bundlePath, NSString *entitlementsPath)
                           @"entitlements NOT in profile whitelist: %@ -> reject",
                           [extra componentsJoinedByString:@", "]);
         } else {
-            RPVDiagnostic(RPVDiagInfo, @"sign", @"entitlements ⊆ profile whitelist: YES");
+            RPVDiagnostic(RPVDiagDebug, @"sign", @"entitlements ⊆ profile whitelist: YES");
         }
     }
 
-    RPVDiagnostic(RPVDiagInfo, @"sign", @"=== end PROFILE MATCH DIAGNOSTICS ===");
+    RPVDiagnostic(RPVDiagDebug, @"sign", @"=== end PROFILE MATCH DIAGNOSTICS ===");
 }
 
 // zsign 之后报告磁盘上的描述文件布局：主 App 必须有 embedded.mobileprovision，
@@ -494,8 +494,8 @@ static void RZLogProfileDiagnostics(NSString *bundlePath) {
     NSString *appName = [bundlePath lastPathComponent].stringByDeletingPathExtension;
     NSString *mainProv = [bundlePath stringByAppendingPathComponent:@"embedded.mobileprovision"];
 
-    RPVDiagnostic(RPVDiagInfo, @"sign", @"=== re-sign diagnostics for %@ ===", appName);
-    RPVDiagnostic(RPVDiagInfo, @"sign", @"main app embedded.mobileprovision: %@",
+    RPVDiagnostic(RPVDiagDebug, @"sign", @"=== re-sign diagnostics for %@ ===", appName);
+    RPVDiagnostic(RPVDiagDebug, @"sign", @"main app embedded.mobileprovision: %@",
                   [fm fileExistsAtPath:mainProv] ? @"present" : @"MISSING");
 
     NSDirectoryEnumerator *enumerator = [fm enumeratorAtURL:[NSURL fileURLWithPath:bundlePath]
@@ -508,14 +508,14 @@ static void RZLogProfileDiagnostics(NSString *bundlePath) {
             NSString *ip = [p stringByAppendingPathComponent:@"Info.plist"];
             NSString *prov2 = [p stringByAppendingPathComponent:@"embedded.mobileprovision"];
             BOOL hasProv = [fm fileExistsAtPath:prov2];
-            RPVDiagnostic(hasProv ? RPVDiagError : RPVDiagInfo, @"sign",
+            RPVDiagnostic(hasProv ? RPVDiagError : RPVDiagDebug, @"sign",
                           @"framework %@ : Info.plist=%@ embedded.mobileprovision=%@",
                           [p lastPathComponent],
                           [fm fileExistsAtPath:ip] ? @"yes" : @"NO",
                           hasProv ? @"yes（非法，应为 no）" : @"no（正确）");
         }
     }
-    RPVDiagnostic(RPVDiagInfo, @"sign", @"=== end diagnostics ===");
+    RPVDiagnostic(RPVDiagDebug, @"sign", @"=== end diagnostics ===");
 }
 
 /* Private headers */

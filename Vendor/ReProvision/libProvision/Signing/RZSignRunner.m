@@ -260,7 +260,7 @@ static NSString *rpv_strip_ansi(NSString *s) {
     // 版本都在猜"zsign 到底签了什么、跳过了哪个 bundle"，就是因为这段输出用户
     // 根本看不到。zsign 会打印它识别到的每一个 bundle、匹配到的描述文件，
     // 以及跳过的原因，是定位 0xe8008015 最直接的证据。
-    RPVDiagnostic(result.success ? RPVDiagInfo : RPVDiagError, @"zsign",
+    RPVDiagnostic(RPVDiagDebug, @"zsign",
                   @"===== zsign 输出开始（退出码 %d）=====", result.exitCode);
     if (log.length == 0) {
         RPVDiagnostic(RPVDiagWarning, @"zsign", @"(zsign 没有任何输出)");
@@ -268,10 +268,10 @@ static NSString *rpv_strip_ansi(NSString *s) {
         for (NSString *line in [log componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
             NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
             if (trimmed.length == 0) continue;
-            RPVDiagnostic(RPVDiagInfo, @"zsign", @"%@", trimmed);
+            RPVDiagnostic(RPVDiagDebug, @"zsign", @"%@", trimmed);
         }
     }
-    RPVDiagnostic(RPVDiagInfo, @"zsign", @"===== zsign 输出结束 =====");
+    RPVDiagnostic(RPVDiagDebug, @"zsign", @"===== zsign 输出结束 =====");
 
     if (!result.success && error) {
         NSString *detail = (log.length > 0)

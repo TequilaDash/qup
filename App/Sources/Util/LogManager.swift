@@ -139,25 +139,34 @@ class LogManager: ObservableObject {
         // 过滤噪音行（前缀黑名单；匹配后整行丢弃）。
         // 🔴 v1.1.189：前缀统一不带前导空格，匹配前先 trim —— 旧版黑名单写「sudo 」，
         // 实际日志行是「  sudo …」（管理命令列表带两个空格缩进），hasPrefix 匹配失败漏网。
-        let noisePrefixes = [
-            "=====",            // 启动横幅分隔线（长度不固定，短前缀兜底）
+        // 🔴 v2.2.8 修复：daemon 日志行自带 "[时间戳] " 前缀，旧版 hasPrefix 匹配自
+        // v1.1.186 daemon 加时间戳起就永远失效（横幅噪音全进了日志页）→ 改 contains 匹配，
+        // 并补充 daemon 每小时例行启动/退出的横幅与噪音。保留真正有用的：续签开始/中止/结果。
+        let noiseTokens = [
+            "=====",
             "=== 启动",
             "管理命令:",
             "sudo ",
             "已注册信号处理",
             "内存看门狗已启动",
             "超时看门狗已启动",
-            "ℹ️ 无法自检 entitlement",
-            "namespace: ",
+            "无法自检 entitlement",
+            "jbroot namespace (启动路径",
             "（若怀疑裸签",
-            "配置: 自动",
             "BundleID: ",
             "架构: ",
             "launchd 每小时重新拉起",
+            "非持久化定时检查",
+            "收到信号",
+            "本轮检查无需续签",
+            "读取配置[来源",
+            "配置: 自动",
+            "触发路径: ",
+            "════",
+            "释放资源并退出",
         ]
         let meaningful = lines.filter { line in
-            let t = line.trimmingCharacters(in: .whitespaces)
-            return !noisePrefixes.contains { t.hasPrefix($0) }
+            !noiseTokens.contains { line.localizedCaseInsensitiveContains($0) }
         }
         guard !meaningful.isEmpty else { return }
         let tail = Array(meaningful.suffix(25))
@@ -219,10 +228,18 @@ class LogManager: ObservableObject {
         daemonLogWrite(ts: ts, source: source, message: message)
 
         // 内存日志：异步更新 UI
+        // 🔴 v2.2.8 防刷屏：与上一条完全相同（级别+来源+消息）且间隔 <2s 的重复日志丢弃
+        //（如 protectedDataDidBecomeAvailable 同一秒连发两条）。
         queue.async { [weak self] in
             DispatchQueue.main.async {
-                self?.logs.append(entry)
-                while (self?.logs.count ?? 0) > (self?.maxLogEntries ?? 50) { self?.logs.removeFirst() }
+                guard let self = self else { return }
+                if let last = self.logs.last,
+                   last.level == entry.level, last.source == entry.source, last.message == entry.message,
+                   entry.timestamp.timeIntervalSince(last.timestamp) < 2 {
+                    return
+                }
+                self.logs.append(entry)
+                while self.logs.count > self.maxLogEntries { self.logs.removeFirst() }
             }
             os_log("[%@][%@] %@", log: OSLog(subsystem: "cn.analy.resign", category: source),
                    type: (level == .error ? .error : level == .warning ? .default : .info),

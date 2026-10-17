@@ -1012,11 +1012,19 @@ static BOOL (^_rpvDaemonProfileInstallHandler)(NSString *profilePath) = nil;
 - (void)_appShouldBeRemoved:(NSNotification *)notification {
     NSString *bundleIdentifier = [[notification userInfo] objectForKey:@"bundleIdentifier"];
     if (bundleIdentifier) {
-        // 「>iOS18版本 切换方案」：iOS 26 起 LS 卸载入口被 stub，记录返回值/系统版本待确认。
+        // 「>iOS18版本 切换方案」：iOS 26 起 LS 卸载入口被 stub（恒定返回 NO），先走 LS，
+        // 失败且 iOS>=26 时回退 MobileInstallationUninstall（与另两处卸载点对齐，v2.2.8 补齐）。
         BOOL ok = [[LSApplicationWorkspace defaultWorkspace] uninstallApplication:bundleIdentifier withOptions:nil];
         RPVDiagnostic(ok ? RPVDiagInfo : RPVDiagError, @"uninstall",
                       @"「>iOS18版本 切换方案」_appShouldBeRemoved bundleID=%@ → LS 返回 %@ (iOS major=%ld)",
                       bundleIdentifier, ok ? @"YES" : @"NO", (long)RPVSystemMajorVersion());
+        if (!ok && RPVSystemMajorVersion() >= 26) {
+            NSError *miErr = nil;
+            ok = RPVUninstallWithMobileInstallation(bundleIdentifier, &miErr);
+            RPVDiagnostic(ok ? RPVDiagInfo : RPVDiagError, @"uninstall",
+                          @"「>iOS18版本 切换方案」_appShouldBeRemoved 回退 MobileInstallation → %@ (err=%@)",
+                          ok ? @"YES" : @"NO", miErr ? miErr.localizedDescription : @"nil");
+        }
     }
 }
 

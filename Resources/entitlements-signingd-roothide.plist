@@ -2,6 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <!-- 🔴 v2.2.8：daemon 侧 InstallCoordination 安装通道（iOS 26）同样需要本权限 -->
+  <key>com.apple.private.InstallCoordination.allowed</key>
+  <true/>
+
 	<!-- repro-signingd 后台续签守护进程（RootHide 专属）
 
 	     在通用版基础上多一组 no-sandbox / storage.*：

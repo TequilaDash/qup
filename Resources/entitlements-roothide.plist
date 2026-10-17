@@ -12,6 +12,12 @@
          仅靠 App 自身 MC 注册到本地库。故与 test2 对齐：去掉 no-sandbox；文件访问走
          jbroot 内路径（App 以 posix_spawn 拉 repro-helper，不需要 mach-lookup，沙箱下可用）。 -->
 
+    <!-- 🔴 v2.2.8：iOS 26 安装走 InstallCoordination（LS 已被 stub），缺本权限时
+         installcoordinationd 拒连（NSCocoaErrorDomain 4097 无法与帮助程序通信）。
+         rootless 线 v2.1.36 已加，roothide 线此前漏配 —— 真机日志实锤的安装失败根因。 -->
+    <key>com.apple.private.InstallCoordination.allowed</key>
+    <true/>
+
     <key>com.apple.private.mobileinstall.allowedSPI</key>
     <array>
       <string>Lookup</string>

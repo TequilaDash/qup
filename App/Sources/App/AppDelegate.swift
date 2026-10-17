@@ -33,9 +33,54 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     /// v1.1.184: 检测间隔上限（与 daemon 的 kMaxCheckIntervalHours 一致）= 最多 12 小时。
     private static let maxCheckIntervalHours = 12
 
+    /// 🔴 v2.2.8 诊断：SecTask 自检本进程私有 entitlements 是否幸存。
+    /// iOS 26 安装走 InstallCoordination，缺
+    /// com.apple.private.InstallCoordination.allowed = installcoordinationd 拒连（安装必败）。
+    /// 摘要 1 行 info（简洁模式可见），逐项明细 debug。
+    private func logEntitlementSelfCheck() {
+        guard let handle = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_LAZY),
+              let pCreate = dlsym(handle, "SecTaskCreateFromSelf"),
+              let pCopy = dlsym(handle, "SecTaskCopyValueForEntitlement") else {
+            LogManager.shared.warning("entitlement 自检：SecTask 不可用（dlopen/dlsym 失败）", source: "entitlement")
+            return
+        }
+        typealias CreateFromSelf = @convention(c) (CFAllocator?) -> UnsafeMutableRawPointer?
+        typealias CopyValue = @convention(c) (UnsafeMutableRawPointer, CFString, UnsafeMutablePointer<Unmanaged<CFError>?>?) -> CFTypeRef?
+        let create = unsafeBitCast(pCreate, to: CreateFromSelf.self)
+        let copyValue = unsafeBitCast(pCopy, to: CopyValue.self)
+        guard let task = create(nil) else {
+            LogManager.shared.warning("entitlement 自检：SecTaskCreateFromSelf 返回空", source: "entitlement")
+            return
+        }
+        let keys = [
+            "com.apple.private.InstallCoordination.allowed",
+            "com.apple.private.mobileinstall.allowedSPI",
+            "com.apple.private.security.no-container",
+            "platform-application",
+            "com.apple.authkit.client.private",
+        ]
+        var summary: [String] = []
+        for key in keys {
+            let v = copyValue(task, key as CFString, nil)
+            if let v = v {
+                let text = (v as? Bool).map { $0 ? "✅" : "false" } ?? "✅(有值)"
+                summary.append("\(key)=\(text)")
+                LogManager.shared.debug("entitlement 明细 \(key)=\(text)", source: "entitlement")
+            } else {
+                summary.append("\(key)=❌缺失")
+                LogManager.shared.debug("entitlement 明细 \(key)=❌缺失", source: "entitlement")
+            }
+        }
+        let missing = summary.filter { $0.contains("❌") }.count
+        LogManager.shared.info(
+            "entitlement 自检：\(keys.count - missing)/\(keys.count) 项幸存\(missing > 0 ? "（❌项=RootHide 剥离/未签名，iOS26 安装必败根因）" : "")｜\(summary.joined(separator: " "))",
+            source: "entitlement")
+    }
+
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         LogManager.shared.initialize()
+        logEntitlementSelfCheck()   // 🔴 v2.2.8：自检私有权限是否幸存（RootHide 剥离=安装失败根因取证）
 
         // 公共初始化：根助手回调、通知代理、配置同步、通知监听。
         // 无论前台打开还是 daemon 后台拉起都执行，保证 UI / 回调始终就绪（修复白屏）。

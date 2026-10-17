@@ -7,6 +7,9 @@ struct LogView: View {
     @ObservedObject private var logManager = LogManager.shared
     @State private var searchText = ""
     @State private var selectedFilter: LogLevel? = nil
+    /// v2.2.8 简洁模式（默认开启）：隐藏 debug 级明细（zsign 逐行输出、签名诊断块等），
+    /// 需要排查时切「全部」或「调试」看完整内容。
+    @State private var conciseMode = true
     @State private var showingClearAlert = false
     @State private var showingExportError = false
     @State private var exportErrorMessage = ""
@@ -109,20 +112,26 @@ struct LogView: View {
     // MARK: 筛选标签组（纯文字胶囊，无图标）
     private var filterChips: some View {
         HStack(spacing: 7) {
+            filterChip(title: "简洁", level: nil, isConcise: true)
             filterChip(title: "全部", level: nil)
             filterChip(title: "错误", level: .error)
             filterChip(title: "警告", level: .warning)
-            filterChip(title: "信息", level: .info)
             filterChip(title: "调试", level: .debug)
         }
         .padding(.horizontal, 16)
     }
 
     @ViewBuilder
-    private func filterChip(title: String, level: LogLevel?) -> some View {
-        let isSelected = selectedFilter == level
+    private func filterChip(title: String, level: LogLevel?, isConcise: Bool = false) -> some View {
+        let isSelected = isConcise ? conciseMode && selectedFilter == nil : !conciseMode && selectedFilter == level
         Button {
-            selectedFilter = isSelected ? nil : level
+            if isConcise {
+                conciseMode = true
+                selectedFilter = nil
+            } else {
+                conciseMode = false
+                selectedFilter = isSelected ? nil : level
+            }
         } label: {
             Text(title)
                 .font(.subheadline.weight(isSelected ? .semibold : .medium))
@@ -182,6 +191,11 @@ struct LogView: View {
     // MARK: 筛选后的日志
     private var filteredLogs: [LogEntry] {
         var logs = logManager.logs
+
+        // v2.2.8 简洁模式：隐藏 debug 级明细行
+        if conciseMode {
+            logs = logs.filter { $0.level != .debug }
+        }
 
         if let filter = selectedFilter {
             logs = logs.filter { $0.level == filter }
