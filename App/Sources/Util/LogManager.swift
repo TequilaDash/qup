@@ -193,11 +193,8 @@ class LogManager: ObservableObject {
         case 1: warning(message, source: source)
         case 2: error(message, source: source)
         case 3:
-            #if DEBUG
+            // 🔴 v2.2.9：debug 级一律按 debug 落盘（简洁模式默认隐藏），不再在 Release 回流成 info
             debug(message, source: source)
-            #else
-            info(message, source: source)
-            #endif
         default: info(message, source: source)
         }
     }
@@ -206,10 +203,11 @@ class LogManager: ObservableObject {
     func info(_ message: String, source: String = "General")    { append(level: .info,    message: message, source: source) }
     func warning(_ message: String, source: String = "General")  { append(level: .warning, message: message, source: source) }
     func error(_ message: String, source: String = "General")    { append(level: .error,   message: message, source: source) }
+    // 🔴 v2.2.9 修复：旧版 #if DEBUG 门控让 Release 构建把 debug 级日志整个丢掉/或经
+    // handleDiagnostic 的 #else 分支回流成 info（v2.2.8 的日志降噪因此完全失效）。
+    // debug 级现在无条件落盘，由 LogView 的「简洁」模式负责默认隐藏。
     func debug(_ message: String, source: String = "General")    {
-        #if DEBUG
         append(level: .debug, message: message, source: source)
-        #endif
     }
 
     // 静态 formatter 复用（append 每秒可能被调用多次，避免反复创建 DateFormatter）

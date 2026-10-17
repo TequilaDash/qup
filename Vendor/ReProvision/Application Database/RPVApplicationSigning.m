@@ -742,6 +742,17 @@ static BOOL (^_rpvDaemonProfileInstallHandler)(NSString *profilePath) = nil;
                           @"install failed: domain=%@ code=%ld desc=%@ userInfo=%@",
                           error.domain, (long)error.code, error.localizedDescription, error.userInfo);
 
+            // 🔴 v2.2.9：免费账号 3 应用上限（MIInstallerErrorDomain 13 / LibMIS -402620383，
+            // IC 路径包装为 IXUserPresentableErrorDomain 14）→ 给用户可执行的中文指引。
+            // iOS 26 卸载接口全废，坑位只能用户手动腾（桌面长按删除；Dopamine 是越狱本体勿删）。
+            NSError *miUnderlying = error.userInfo[NSUnderlyingErrorKey];
+            BOOL freeLimitHit = [error.localizedDescription containsString:@"maximum number of installed apps"]
+                || (miUnderlying && [miUnderlying.domain isEqualToString:@"MIInstallerErrorDomain"] && miUnderlying.code == 13);
+            if (freeLimitHit) {
+                RPVDiagnostic(RPVDiagWarning, @"install",
+                              @"免费账号 3 应用上限已满：请到桌面长按删除旧应用（如旧版 Relaxin / lara；Dopamine 是越狱本体请勿删）后重新重签。占坑应用见上方错误详情。");
+            }
+
             NSError *err = [self _errorFromString:errorMessage errorCode:RPVErrorFailedToInstallSignedIPA];
             for (id<RPVApplicationSigningProtocol> observer in [self.observers reverseObjectEnumerator]) {
                 [observer applicationSigningDidEncounterError:err forBundleIdentifier:displayBundleIdentifier];
