@@ -22,6 +22,8 @@ function finish() {
 	echo "finish:${f}" >&${cydia[0]}
 }
 
+echo "[$(date +%T)] postinst start"
+
 # Clear Inbox folder（jbroot 路径，vroot shell 下直接可用）
 if [ -d "/var/mobile/Library/Application Support/Containers/cn.analy.resign.ios/Documents/Inbox" ]; then
 	rm -rf "/var/mobile/Library/Application Support/Containers/cn.analy.resign.ios/Documents/Inbox"
@@ -41,6 +43,8 @@ done
 pkill -x reprovisiond 2>/dev/null || true
 pkill -x repro-profiledaemon 2>/dev/null || true
 pkill -x repro-signingd 2>/dev/null || true
+
+echo "[$(date +%T)] cleanup (bootout/pkill) done"
 
 # 按需 root helper：必须 root:wheel + setuid（4755），
 # 否则 mobile 身份的 App 拉起它时拿不到 root。
@@ -129,7 +133,7 @@ load_daemon() {
 
 	local real_plist
 	real_plist=$(jbroot_to_rootfs "$plist")
-	echo "Loading $desc..."
+	echo "[$(date +%T)] Loading $desc..."
 	echo "  jbroot plist = $plist"
 	echo "  rootfs plist  = $real_plist"
 
@@ -143,7 +147,7 @@ load_daemon() {
 
 	"$LAUNCHCTL" bootstrap system "$real_plist" >/dev/null 2>&1 || "$LAUNCHCTL" load "$real_plist" >/dev/null 2>&1 || true
 	"$LAUNCHCTL" kickstart -k "system/$label" >/dev/null 2>&1 || true
-	echo "$desc launched"
+	echo "[$(date +%T)] $desc launched"
 }
 
 # 加载 signingd LaunchDaemon（定时检查是否需要续签，通知 App）
