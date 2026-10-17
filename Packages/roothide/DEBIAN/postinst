@@ -163,7 +163,10 @@ for c in /usr/bin/uicache /bin/uicache; do
 	if [ -x "$c" ]; then UICACHE="$c"; break; fi
 done
 if [ -n "$UICACHE" ]; then
-	"$UICACHE" -p "/Applications/ReSign.app" 2>/dev/null || "$UICACHE" -a 2>/dev/null || true
+	# 🔴 v2.3.0：-a（全量重注册所有应用）在真机上耗时可达数分钟，是 Sileo 安装缓慢的主因。
+	# 只做单应用注册；jbroot 路径失败时用 rootfs 真实路径重试，不再回退 -a。
+	APP_REAL=$(jbroot_to_rootfs "/Applications/ReSign.app")
+	"$UICACHE" -p "/Applications/ReSign.app" 2>/dev/null || "$UICACHE" -p "$APP_REAL" 2>/dev/null || true
 fi
 
 echo "Do, or do not. There is no try."

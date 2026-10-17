@@ -468,9 +468,6 @@ struct SettingsView: View {
                     Image(systemName: "number")
                     Text("查询已注册 AppID")
                     Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
                 }
             }
             .disabled(!account.isSignedIn)
@@ -480,9 +477,6 @@ struct SettingsView: View {
                     Image(systemName: "lock.shield")
                     Text("管理证书")
                     Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
                 }
             }
             .disabled(!account.isSignedIn)
@@ -494,9 +488,6 @@ struct SettingsView: View {
                     Image(systemName: "doc.badge.gearshape")
                     Text("管理描述文件")
                     Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
                 }
             }
             // v1.1.184：「重启 SpringBoard」已从系统操作里移除。
