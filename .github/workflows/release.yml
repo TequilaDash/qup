@@ -1,0 +1,53 @@
+name: Release（复用已验证构建产物，绝不重新构建）
+
+# 🔴 用户规矩（2026-10-17 永久生效）：构建通过后打 tag / release 必须复用产物。
+# 流程：build.yml dispatch 验证构建 → 绿 → 本 workflow 填「那次构建的 run id」
+#       → 直接下载 artifact 建 tag + 发 Release，零重复构建。
+# 注意：在分支 HEAD 与该验证构建 commit 一致时触发（tag 会打在当前 HEAD）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: '已验证构建的 run id（Actions 点开那次构建，地址栏末尾数字）'
+        required: true
+      tag_name:
+        description: '版本 tag（如 v2.1.41 / v2.2.8）'
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 下载已验证构建的 deb 产物（跨 run 下载）
+        uses: actions/download-artifact@v4
+        with:
+          name: debs-${{ inputs.run_id }}
+          path: debs
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ inputs.run_id }}
+
+      - name: 建 tag + 发 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag_name }}
+          name: "ReSign ${{ inputs.tag_name }}"
+          files: debs/*.deb
+          draft: false
+          prerelease: false
+          body: |
+            ## ReSign ${{ inputs.tag_name }}
+            > 产物复自已验证构建 run [${{ inputs.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ inputs.run_id }})，未重复构建。
+            ### 安装包
+            | 包 | 适用环境 |
+            |---|---|
+            | `*_iphoneos-arm64.deb` | Dopamine / rootless |
+            | `*_iphoneos-arm.deb` | rootful (iOS 13/14) |
