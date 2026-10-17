@@ -446,7 +446,7 @@ jobs:
             find "Packages/$pkg/DEBIAN" -type f -exec chmod 0755 {} \;
           done
 
-          dpkg-deb -Zgzip -b Packages/roothide "CydiaPackages/cn.analy.resign_${VERSION}_roothide-iphoneos-arm64e.deb"
+          dpkg-deb -Zgzip -b Packages/roothide "CydiaPackages/cn.analy.resign_${VERSION}_iphoneos-arm64e.deb"
 
           ls -lh CydiaPackages/
 

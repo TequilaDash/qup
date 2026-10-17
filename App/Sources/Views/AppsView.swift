@@ -490,10 +490,13 @@ private struct AppIconView: View {
     let icon: UIImage?
     var body: some View {
         if let icon = icon {
+            // 🔴 v2.2.14：scaledToFill + clipShape 强制铺满 48x48——自带白边/透明边的
+            // 图标（如 Relaxin 的 R 图标）不再显得小一圈、与其它图标不对齐。
             Image(uiImage: icon)
                 .resizable()
+                .scaledToFill()
                 .frame(width: 48, height: 48)
-                .cornerRadius(10)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
         } else {
             RoundedRectangle(cornerRadius: 10)
                 .fill(Color.secondary.opacity(0.3))
