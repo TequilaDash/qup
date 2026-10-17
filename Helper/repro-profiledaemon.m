@@ -293,13 +293,13 @@ static void HandleToolRequest(void) {
             PDWriteToolResult(reqId, @"failed", @"找不到 uicache");
             return;
         }
-        NSMutableArray *args = [NSMutableArray arrayWithObject:uicache];
-        NSString *bundlePath = req[@"bundlePath"];
-        if ([action isEqualToString:@"uicache-app"] && bundlePath.length > 0) {
-            [args addObject:@"-p"]; [args addObject:bundlePath];
-        } else {
-            [args addObject:@"-a"];
-        }
+        // C 数组传参（与 helper 同款；ARC 禁止 NSString 数组转 char* 数组）
+        const char *uc = [uicache fileSystemRepresentation];
+        const char *bp = [req[@"bundlePath"] fileSystemRepresentation];
+        const char *args2[] = { uc,
+                                [action isEqualToString:@"uicache-app"] ? "-p" : "-a",
+                                [action isEqualToString:@"uicache-app"] ? bp : NULL,
+                                NULL };
         posix_spawn_file_actions_t actions;
         posix_spawn_file_actions_init(&actions);
         posix_spawn_file_actions_addopen(&actions, 2,
@@ -307,8 +307,7 @@ static void HandleToolRequest(void) {
             O_WRONLY | O_CREAT | O_TRUNC, 0644);
         pid_t pid = 0;
         int code = -1;
-        if (posix_spawn(&pid, uicache.fileSystemRepresentation, &actions, NULL,
-                        (char *const *)args, NULL) == 0) {
+        if (posix_spawn(&pid, uc, &actions, NULL, (char *const *)args2, NULL) == 0) {
             int status = 0;
             waitpid(pid, &status, 0);
             code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
