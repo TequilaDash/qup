@@ -157,7 +157,7 @@ load_daemon "/Library/LaunchDaemons/cn.analy.resign.profiledaemon.plist" \
             "profiledaemon (system context, outside App namespace)"
 
 # Reload application cache（uicache 是 bootstrap 工具，认 jbroot 路径）
-echo "Reloading application cache"
+echo "[$(date +%T)] uicache start..."
 UICACHE=""
 for c in /usr/bin/uicache /bin/uicache; do
 	if [ -x "$c" ]; then UICACHE="$c"; break; fi
@@ -169,6 +169,7 @@ if [ -n "$UICACHE" ]; then
 	"$UICACHE" -p "/Applications/ReSign.app" 2>/dev/null || "$UICACHE" -p "$APP_REAL" 2>/dev/null || true
 fi
 
+echo "[$(date +%T)] postinst done"
 echo "Do, or do not. There is no try."
 finish restart
 exit 0
