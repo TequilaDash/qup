@@ -294,7 +294,7 @@ final class BridgeClient: ObservableObject {
 
     /// 🔴 v2.2.11：清空应用数据（helper setuid root 定位数据容器并清空内容，应用本身保留）。
     func clearAppData(bundleID: String, completion: @escaping (Bool, String) -> Void) {
-        bridge.clearAppData(forBundleIdentifier: bundleID) { success, message in
+        bridge.clearAppData(bundleID: bundleID) { success, message in
             completion(success, message ?? "")
         }
     }
