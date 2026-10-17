@@ -266,7 +266,7 @@ final class SigningViewModel: ObservableObject {
             client.stageFilesForImport(paths: urls.map { $0.path }) { [weak self] staged in
                 guard let self = self else { return }
                 guard let staged = staged, !staged.isEmpty else {
-                    self.lastError = ReSignError.invalidIPA
+                    self.lastError = "批量导入失败：文件取回失败"
                     self.progressMessage = "批量导入失败：文件取回失败"
                     return
                 }
