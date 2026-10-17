@@ -84,6 +84,8 @@ static void RPVProfileDaemonLog(NSString *fmt, ...) {
 static NSString *const kInventoryPath      = @"/var/mobile/Library/Resign/profiles-inventory.plist";
 static NSString *const kManageResultPath   = @"/var/mobile/Library/Resign/profile-manage-result";
 static NSString *const kManageNotifyName   = @"cn.analy.resign.profile-manage-request";
+static NSString *const kToolReqPath  = @"/var/mobile/Library/Resign/tool-request.plist";
+static NSString *const kToolResPath  = @"/var/mobile/Library/Resign/tool-request-result.plist";
 
 // 🔴 v1.1.185：删除/清理功能整体移除（MC 注销在 RootHide 下 SIGSEGV，见 main 顶部说明）。
 // 不再有 kDeleteRequestPath / kCleanupRequestPath，管理请求只剩「刷新清单」。
@@ -241,8 +243,129 @@ static void HandleRequest(void) {
 /// 处理「描述文件管理」类请求：🔴 v1.1.185 起只剩「刷新清单」。
 /// 删除指定文件 / 手动清理已整体移除（MC 注销在 RootHide 下 SIGSEGV 崩溃，
 /// @try 接不住信号 → daemon 崩溃 → App 等 60s「root 侧未响应」，见 main 顶部说明）。
+/// 解析本 daemon 真实根（<真实根>/usr/libexec/repro-profiledaemon → <真实根>）。
+/// postinst 用 rootfs plist 加载本 daemon，真实根即 jbroot 物理路径，
+/// uicache 就在 <真实根>/usr/bin/uicache（真实命名空间下执行不再 exit 1）。
+static NSString *PDResolveUICache(void) {
+    char buf[PATH_MAX] = {0};
+    uint32_t size = (uint32_t)sizeof(buf);
+    if (_NSGetExecutablePath(buf, &size) != 0) return nil;
+    char resolved[PATH_MAX] = {0};
+    const char *use = realpath(buf, resolved) ? resolved : buf;
+    NSString *path = [NSString stringWithUTF8String:use];
+    NSString *root = path.stringByDeletingLastPathComponent
+                         .stringByDeletingLastPathComponent
+                         .stringByDeletingLastPathComponent;
+    if (root.length == 0) return nil;
+    NSString *uc = [root stringByAppendingPathComponent:@"usr/bin/uicache"];
+    return [[NSFileManager defaultManager] isExecutableFileAtPath:uc] ? uc : nil;
+}
+
+static void PDWriteToolResult(NSString *reqId, NSString *status, NSString *detail) {
+    NSDictionary *res = @{ @"requestId": reqId ?: @"", @"status": status ?: @"?", @"detail": detail ?: @"" };
+    [res writeToFile:kToolResPath atomically:YES];
+    chown(kToolResPath.fileSystemRepresentation, 501, 501);
+}
+
+/// 🔴 v2.2.16：工具请求——真实命名空间代执行
+/// action = uicache-all / uicache-app(带 bundlePath) / stage-import(带 paths)
+static void HandleToolRequest(void) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (![fm fileExistsAtPath:kToolReqPath]) return;
+
+    NSString *consumed = [kToolReqPath stringByAppendingPathExtension:@"consumed"];
+    [fm removeItemAtPath:consumed error:nil];
+    if (![fm moveItemAtPath:kToolReqPath toPath:consumed error:nil]) return;
+    NSDictionary *req = [NSDictionary dictionaryWithContentsOfFile:consumed] ?: @{};
+    [fm removeItemAtPath:consumed error:nil];
+
+    NSString *reqId = req[@"requestId"] ?: @"";
+    NSString *action = req[@"action"] ?: @"";
+    RPVProfileDaemonLog(@"工具请求（action=%@，requestId=%@）", action, reqId);
+
+    if ([action hasPrefix:@"uicache"]) {
+        NSString *uicache = PDResolveUICache();
+        if (uicache.length == 0) {
+            PDWriteToolResult(reqId, @"failed", @"找不到 uicache");
+            return;
+        }
+        NSMutableArray *args = [NSMutableArray arrayWithObject:uicache];
+        NSString *bundlePath = req[@"bundlePath"];
+        if ([action isEqualToString:@"uicache-app"] && bundlePath.length > 0) {
+            [args addObject:@"-p"]; [args addObject:bundlePath];
+        } else {
+            [args addObject:@"-a"];
+        }
+        posix_spawn_file_actions_t actions;
+        posix_spawn_file_actions_init(&actions);
+        posix_spawn_file_actions_addopen(&actions, 2,
+            "/var/mobile/Library/Resign/uicache.stderr.log",
+            O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        pid_t pid = 0;
+        int code = -1;
+        if (posix_spawn(&pid, uicache.fileSystemRepresentation, &actions, NULL,
+                        (char *const *)args, NULL) == 0) {
+            int status = 0;
+            waitpid(pid, &status, 0);
+            code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        }
+        posix_spawn_file_actions_destroy(&actions);
+        PDWriteToolResult(reqId, code == 0 ? @"success" : @"failed",
+                          [NSString stringWithFormat:@"uicache exit=%d", code]);
+        return;
+    }
+
+    if ([action isEqualToString:@"stage-import"]) {
+        // 把 App 选择器回传的文件（iCloud/overlay 内路径）拷到豁免共享目录，
+        // App 即可从 /var/mobile/Library/Resign/imports/<requestId>/ 直接读取。
+        NSArray *paths = [req[@"paths"] isKindOfClass:[NSArray class]] ? req[@"paths"] : @[];
+        NSString *destDir = [kIpcDir stringByAppendingPathComponent:
+                             [NSString stringWithFormat:@"imports/%@", reqId]];
+        [fm createDirectoryAtPath:destDir withIntermediateDirectories:YES attributes:nil error:nil];
+        chown(destDir.fileSystemRepresentation, 501, 501);
+        NSFileCoordinator *coord = [[NSFileCoordinator alloc] initWithFilePresenter:nil];
+        NSMutableArray *staged = [NSMutableArray array];
+        NSMutableArray *errors = [NSMutableArray array];
+        for (NSString *srcPath in paths) {
+            NSURL *src = [NSURL fileURLWithPath:srcPath];
+            __block NSError *cerr = nil;
+            // ReadingForUploading：iCloud 未下载的文件会先触发下载，回传本地临时副本
+            [coord coordinateReadingItemAtURL:src
+                                      options:NSFileCoordinatorReadingForUploading
+                                        error:&cerr
+                                   byAccessor:^(NSURL *newURL) {
+                NSString *dest = [destDir stringByAppendingPathComponent:src.lastPathComponent];
+                [[NSFileManager defaultManager] removeItemAtPath:dest error:nil];
+                if ([[NSFileManager defaultManager] copyItemAtURL:newURL
+                                                            toURL:[NSURL fileURLWithPath:dest]
+                                                            error:nil]) {
+                    [staged addObject:dest];
+                } else {
+                    [errors addObject:src.lastPathComponent];
+                }
+            }];
+        }
+        if (errors.count > 0 || staged.count == 0) {
+            PDWriteToolResult(reqId, @"failed",
+                              [NSString stringWithFormat:@"部分文件暂存失败：%@", [errors componentsJoinedByString:@", "]]);
+        } else {
+            PDWriteToolResult(reqId, @"success", [staged componentsJoinedByString:@"\n"]);
+        }
+        return;
+    }
+
+    PDWriteToolResult(reqId, @"failed", [NSString stringWithFormat:@"未知 action：%@", action]);
+}
+
 static void HandleManageRequests(void) {
     __sync_fetch_and_add(&g_busy, 1);
+
+    // 🔴 v2.2.16：工具请求优先（uicache / 批量导入暂存），处理完即返回
+    if ([[NSFileManager defaultManager] fileExistsAtPath:kToolReqPath]) {
+        HandleToolRequest();
+        __sync_fetch_and_sub(&g_busy, 1);
+        return;
+    }
 
     // 刷新清单（App「描述文件管理」的「刷新清单」按钮走这里）。
     // 清单先写、结果后回，保证 App 轮询到结果时清单已是最新。
@@ -287,6 +410,16 @@ int main(int argc, char *argv[]) {
             RPVProfileDaemonLog(@"收到管理通知（token %d）", t);
             HandleManageRequests();
         });
+
+        // 🔴 v2.2.16：工具请求（uicache / 批量导入暂存）
+        int toolToken = 0;
+        notify_register_dispatch("cn.analy.resign.tool-request", &toolToken,
+                                 dispatch_get_main_queue(), ^(int t) {
+            RPVProfileDaemonLog(@"收到工具请求");
+            HandleToolRequest();
+        });
+        // 启动时消费一次（App 在 daemon 未运行时写入的请求靠这里兜底）
+        HandleToolRequest();
 
         // 🔴 v1.1.171：消费 launchd 的 notifyd 事件流。
         // plist 里配了 LaunchEvents(com.apple.notifyd.matching)，launchd 会在收到

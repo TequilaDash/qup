@@ -747,6 +747,45 @@ static BOOL RPVHelperKillSpringBoard(void) {
 ///
 /// bundlePath 为空 → `uicache -a`（重建全部）；非空 → `uicache -p <path>`（只重注册一个 App）。
 static int RPVHelperRebuildIconCache(NSString *bundlePath) {
+    // 🔴 v2.2.16：RootHide 下 helper 在 jbroot namespace 内，uicache 读
+    // /var/containers 恒 exit 1（按钮"没有用"的根因）→ 改经 profiledaemon
+    //（launchd 真实命名空间 root）代执行：写请求 → kickstart → 轮询结果。
+    NSString *selfRoot = RPVHelperSelfRoot();
+    if ([selfRoot containsString:@".jbroot-"]) {
+        NSDictionary *req = @{
+            @"requestId": [[NSUUID UUID] UUIDString],
+            @"action": bundlePath.length > 0 ? @"uicache-app" : @"uicache-all",
+            @"bundlePath": bundlePath ?: @"",
+            @"timestamp": @([[NSDate date] timeIntervalSince1970]),
+        };
+        NSString *reqPath = @"/var/mobile/Library/Resign/tool-request.plist";
+        NSString *resPath = @"/var/mobile/Library/Resign/tool-request-result.plist";
+        [[NSFileManager defaultManager] removeItemAtPath:resPath error:nil];
+        [req writeToFile:reqPath atomically:YES];
+        NSString *pd = RPVHelperResolveTool(@"repro-profiledaemon");
+        if (pd.length > 0) {
+            const char *args2[] = { [pd fileSystemRepresentation], "-k", NULL };
+            pid_t p2 = 0;
+            if (posix_spawn(&p2, pd.fileSystemRepresentation, NULL, NULL, (char *const *)args2, NULL) == 0) {
+                int st = 0; waitpid(p2, &st, 0);
+            }
+        }
+        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:45];
+        NSDictionary *res = nil;
+        while ([NSDate date] < deadline) {
+            [NSThread sleepForTimeInterval:0.5];
+            res = [NSDictionary dictionaryWithContentsOfFile:resPath];
+            if (res && [res[@"requestId"] isEqualToString:req[@"requestId"]]) break;
+            res = nil;
+        }
+        if (!res || ![res[@"status"] isEqualToString:@"success"]) {
+            RPVHelperLog(@"rebuild-icon-cache: profiledaemon 代执行失败（%@）",
+                         res[@"detail"] ?: @"超时");
+            return 1;
+        }
+        RPVHelperLog(@"rebuild-icon-cache: profiledaemon 代执行成功");
+        // 继续下方 lsd 重启 + respring
+    }
     BOOL single = (bundlePath.length > 0);
     RPVHelperLog(@"rebuild-icon-cache: 开始（uicache %@ → kickstart lsd → respring）",
                  single ? [@"-p " stringByAppendingString:bundlePath] : @"-a");

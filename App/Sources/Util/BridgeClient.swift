@@ -299,6 +299,14 @@ final class BridgeClient: ObservableObject {
         }
     }
 
+    /// 🔴 v2.2.16：批量导入/iCloud 暂存——把选择器回传的文件经 profiledaemon
+    ///（真实命名空间 root）拷到豁免共享目录，返回可直接读取的本地路径数组。
+    func stageFilesForImport(paths: [String], completion: @escaping ([String]?) -> Void) {
+        bridge.stageFilesForImport(paths: paths) { staged in
+            completion(staged)
+        }
+    }
+
     // MARK: - IPA 导入
 
     func importIPA(url: URL, completion: @escaping (Result<InstalledApp, Error>) -> Void) {

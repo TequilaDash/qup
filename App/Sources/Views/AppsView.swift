@@ -5,9 +5,9 @@ import UniformTypeIdentifiers
 
 /// 直接从 root VC present UIDocumentPickerViewController，无需 sheet 包裹
 private final class IPAFilePicker: NSObject, UIDocumentPickerDelegate {
-    private let onPick: (URL) -> Void
+    private let onPick: ([URL]) -> Void
 
-    init(onPick: @escaping (URL) -> Void) { self.onPick = onPick }
+    init(onPick: @escaping ([URL]) -> Void) { self.onPick = onPick }
 
     func present() {
         guard let root = UIApplication.shared.connectedScenes
@@ -29,7 +29,7 @@ private final class IPAFilePicker: NSObject, UIDocumentPickerDelegate {
         types.append(.data)
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: true)
         picker.delegate = self
-        picker.allowsMultipleSelection = false
+        picker.allowsMultipleSelection = true // 🔴 v2.2.16：批量导入
         top.present(picker, animated: true)
 
         // 强引用自己，防止 delegate 回调前被释放
@@ -37,9 +37,9 @@ private final class IPAFilePicker: NSObject, UIDocumentPickerDelegate {
     }
 
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-        if let url = urls.first {
-            LogManager.shared.info("用户选择了文件: \(url.lastPathComponent)", source: "AppsView")
-            onPick(url)
+        if urls.count > 0 {
+            LogManager.shared.info("用户选择了 \(urls.count) 个文件", source: "AppsView")
+            onPick(urls)
         }
         controller.dismiss(animated: true)
     }
@@ -212,8 +212,12 @@ struct AppsView: View {
 
     // MARK: 打开文件选择器
     private func openFilePicker() {
-        let picker = IPAFilePicker { url in
-            viewModel.importIPA(url: url)
+        let picker = IPAFilePicker { urls in
+            if urls.count == 1 {
+                viewModel.importIPA(url: urls[0])      // 单个：原流程（含扩展选择弹窗）
+            } else {
+                viewModel.importIPAs(urls: urls)       // 🔴 v2.2.16：批量（标准签名流程）
+            }
         }
         picker.present()
     }

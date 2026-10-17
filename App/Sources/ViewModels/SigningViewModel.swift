@@ -248,6 +248,73 @@ final class SigningViewModel: ObservableObject {
     /// url 来自 fileImporter，是 security-scoped 的；
     /// Vendor 侧 RPVIpaBundleApplication 会自己 startAccessingSecurityScopedResource,
     /// 所以这里不再手动往 tmp 复制一份。
+    // MARK: - 批量导入（v2.2.16）
+
+    /// 批量导入：逐个走标准签名流程（各扩展注册具体 profile，与单文件「标准签名」等价）。
+    /// RootHide 下选择器回传的文件在 overlay 内读不到 → 先经 profiledaemon
+    ///（launchd 真实命名空间 root）拷到豁免共享目录。
+    func importIPAs(urls: [URL]) {
+        guard !isBusy, !urls.isEmpty else { return }
+        isBusy = true
+        lastError = nil
+        LogManager.shared.info("批量导入 \(urls.count) 个文件", source: "SigningViewModel")
+
+        // RootHide：选择器回传的 URL（iCloud/FileProvider/overlay）App 读不到 →
+        // 经 profiledaemon（launchd 真实命名空间 root）拷到豁免共享目录再导入。
+        if RPVBridge.isRootHide() {
+            progressMessage = "正在从 iCloud/云盘取回文件…"
+            client.stageFilesForImport(paths: urls.map { $0.path }) { [weak self] staged in
+                guard let self = self else { return }
+                guard let staged = staged, !staged.isEmpty else {
+                    self.lastError = ReSignError.invalidIPA
+                    self.progressMessage = "批量导入失败：文件取回失败"
+                    return
+                }
+                self.importBatchSequential(urls: staged.map { URL(fileURLWithPath: $0) })
+            }
+            return
+        }
+
+        importBatchSequential(urls: urls)
+    }
+
+    private func importBatchSequential(urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        var remaining = urls
+        let first = remaining.removeFirst()
+        LogManager.shared.info("批量导入开始（共 \(urls.count) 个，标准签名流程）", source: "SigningViewModel")
+        importOneAndContinue(url: first, remaining: remaining, total: urls.count, ok: 0, failed: [])
+    }
+
+    private func importOneAndContinue(url: URL, remaining: [URL], total: Int, ok: Int, failed: [String]) {
+        progressMessage = "批量导入 \(total - remaining.count)/\(total)：\(url.lastPathComponent)"
+        // 批量固定标准签名流程（各扩展注册具体 profile），不弹扩展选择窗
+        RPVBridge.setExtensionImportOptions(removeExtensions: false, useMainProfile: false)
+        client.importIPA(url: url) { [weak self] result in
+            guard let self = self else { return }
+            var ok = ok
+            var failed = failed
+            switch result {
+            case .success(let app):
+                ok += 1
+                LogManager.shared.info("批量导入成功: \(app.bundleIdentifier)", source: "SigningViewModel")
+            case .failure(let e):
+                failed.append("\(url.lastPathComponent)：\(e.localizedDescription)")
+                LogManager.shared.error("批量导入失败 [\(url.lastPathComponent)]: \(e.localizedDescription)", source: "SigningViewModel")
+            }
+            if let next = remaining.first {
+                var rest = remaining
+                rest.removeFirst()
+                self.importOneAndContinue(url: next, remaining: rest, total: total, ok: ok, failed: failed)
+            } else {
+                let summary = "批量导入完成：成功 \(ok)/\(total)\(failed.isEmpty ? "" : "；失败：\(failed.joined(separator: "；"))")"
+                LogManager.shared.info(summary, source: "SigningViewModel")
+                self.endWork(message: summary)
+                Task { await self.refreshApps() }
+            }
+        }
+    }
+
     func importIPA(url: URL) {
         LogManager.shared.info("导入 IPA: \(url.lastPathComponent)", source: "SigningViewModel")
 

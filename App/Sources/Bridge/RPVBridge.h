@@ -194,11 +194,21 @@ NS_SWIFT_SENDABLE
 - (BOOL)removeApplicationWithBundleIdentifier:(NSString *)bundleIdentifier
     NS_SWIFT_NAME(removeApplication(bundleIdentifier:));
 
+/// 当前是否 RootHide 环境（v2.2.16 供 Swift 侧分支判断）。
++ (BOOL)isRootHideEnvironment
+    NS_SWIFT_NAME(isRootHide());
+
 /// 🔴 v2.2.11：清空应用数据（repro-helper setuid root 代执行：定位数据容器并清空内容，
 /// 应用本身保留）。completion 在主队列回调；success=NO 时 message 含失败原因。
 - (void)clearAppDataForBundleIdentifier:(NSString *)bundleID
                              completion:(void (^)(BOOL success, NSString *_Nullable message))completion
     NS_SWIFT_NAME(clearAppData(bundleID:completion:));
+
+/// 🔴 v2.2.16：批量导入/iCloud 暂存——把选择器回传的文件经 profiledaemon
+///（真实命名空间 root）拷到豁免共享目录，返回可直接读取的本地路径数组。
+- (void)stageFilesForImport:(NSArray<NSString *> *)paths
+                 completion:(void (^)(NSArray<NSString *> *_Nullable stagedPaths))completion
+    NS_SWIFT_NAME(stageFilesForImport(paths:completion:));
 
 #pragma mark IPA 导入
 

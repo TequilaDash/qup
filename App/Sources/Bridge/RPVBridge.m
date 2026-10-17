@@ -604,6 +604,11 @@ static void RPVBridgeCallOnMain(dispatch_block_t block) {
 /// 设置里「修复当前插件联网」按钮调用：同步拉起 repro-helper fix-cellular（CoreTelephony 路径），
 /// 只把当前插件（ReSign）自身的蜂窝/WiFi 数据策略重置为「始终允许」，刷新偏好缓存（killall cfprefsd）生效。
 /// 仅手动触发，无 daemon 自动循环。
+/// 🔴 v2.2.16：当前是否 RootHide 环境（App bundle 旁存在 .jbroot 符号链接）。
++ (BOOL)isRootHideEnvironment {
+    return RPVIsRootHideEnvironment();
+}
+
 - (void)fixCellularDataWithCompletion:(void (^)(BOOL success, NSString *_Nullable message))completion {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         NSString *helperPath = RPVResolvedRootHelperPath();
@@ -656,6 +661,57 @@ static void RPVBridgeCallOnMain(dispatch_block_t block) {
         }
     });
 }
+
+/// 🔴 v2.2.16：批量导入/iCloud 暂存——把选择器回传的文件经 profiledaemon
+///（launchd 真实命名空间 root）拷到豁免共享目录，返回 App 可直接读取的本地路径数组
+///（detail 每行一个）。RootHide 下 App 的 overlay 读不到 iCloud/FileProvider 路径。
+- (void)stageFilesForImport:(NSArray<NSString *> *)paths
+                 completion:(void (^)(NSArray<NSString *> *_Nullable stagedPaths))completion {
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        static NSString *const kIpcDir  = @"/var/mobile/Library/Resign";
+        static NSString *const kReqPath = @"/var/mobile/Library/Resign/tool-request.plist";
+        static NSString *const kResPath = @"/var/mobile/Library/Resign/tool-request-result.plist";
+        NSFileManager *fm = [NSFileManager defaultManager];
+        [fm createDirectoryAtPath:kIpcDir withIntermediateDirectories:YES attributes:nil error:nil];
+        [fm removeItemAtPath:kResPath error:nil];
+
+        NSString *requestId = [[NSUUID UUID] UUIDString];
+        NSDictionary *req = @{ @"requestId": requestId,
+                               @"action": @"stage-import",
+                               @"paths": paths ?: @[],
+                               @"timestamp": @([[NSDate date] timeIntervalSince1970]) };
+        if (![req writeToFile:kReqPath atomically:YES]) {
+            if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(nil); });
+            return;
+        }
+
+        notify_post("cn.analy.resign.profile-manage-request");
+        NSString *helperPath = RPVResolvedRootHelperPath();
+        if (helperPath.length > 0) {
+            RPVRunRootHelper(helperPath, @[@"kickstart-profiledaemon"]);
+        }
+
+        NSDictionary *res = nil;
+        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:30];
+        while ([NSDate date] < deadline) {
+            [NSThread sleepForTimeInterval:0.5];
+            res = [NSDictionary dictionaryWithContentsOfFile:kResPath];
+            if (res && [res[@"requestId"] isEqualToString:requestId]) break;
+            res = nil;
+        }
+
+        NSMutableArray *staged = [NSMutableArray array];
+        if (res && [res[@"status"] isEqualToString:@"success"]) {
+            for (NSString *line in [res[@"detail"] componentsSeparatedByString:@"\n"]) {
+                if (line.length > 0) [staged addObject:line];
+            }
+        }
+        if (completion) {
+            dispatch_async(dispatch_get_main_queue(), ^{ completion(staged.count > 0 ? staged : nil); });
+        }
+    });
+}
+
 
 #pragma mark - RPVApplicationSigningProtocol
 
