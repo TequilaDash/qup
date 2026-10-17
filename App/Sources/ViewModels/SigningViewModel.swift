@@ -308,6 +308,7 @@ final class SigningViewModel: ObservableObject {
             client.stageFilesForImport(paths: urls.map { $0.path }) { [weak self] staged in
                 guard let self = self else { return }
                 guard let staged = staged, !staged.isEmpty else {
+                    LogManager.shared.error("文件取回失败（profiledaemon 暂存超时或失败）——请重试或改用本地文件导入", source: "SigningViewModel")
                     self.lastError = "批量导入失败：文件取回失败"
                     self.progressMessage = "批量导入失败：文件取回失败"
                     return
@@ -359,6 +360,14 @@ final class SigningViewModel: ObservableObject {
 
     func importIPA(url: URL) {
         LogManager.shared.info("导入 IPA: \(url.lastPathComponent)", source: "SigningViewModel")
+
+        // 🔴 v2.2.18：RootHide 下选择器回传的文件（iCloud 云盘/FileProvider/overlay 路径）
+        // App 读不到 → 与批量导入同一通道：经 profiledaemon（launchd 真实命名空间 root）
+        // 暂存到豁免共享目录后再走原流程。
+        if RPVBridge.isRootHide() {
+            importIPAs(urls: [url])
+            return
+        }
 
         // 检测是否含 App 扩展；含则先弹窗让用户决定处理方式，不直接开始导入。
         if RPVBridge.ipaContainsExtensions(at: url) {
