@@ -215,6 +215,48 @@ final class SigningViewModel: ObservableObject {
 
     /// 重签一个「其他应用」（非当前 Apple ID 签名的应用）。
     /// 与普通 resign 相同流程，但 autoRevoke 逻辑已在调用方处理。
+    // MARK: - 批量重签其它应用（v2.2.17）
+
+    /// 串行链式重签其它应用分区的所有应用（每个完成后自动开始下一个）。
+    func resignOtherAppsBatch() {
+        guard !isBusy else { return }
+        let apps = otherApps
+        guard !apps.isEmpty else { return }
+        isBusy = true
+        lastError = nil
+        LogManager.shared.info("批量重签其它应用（共 \(apps.count) 个）", source: "SigningViewModel")
+        resignOtherBatchNext(index: 0, apps: apps, ok: 0, failed: [])
+    }
+
+    private func resignOtherBatchNext(index: Int, apps: [InstalledApp], ok: Int, failed: [String]) {
+        guard index < apps.count else {
+            let summary = "批量重签完成：成功 \(ok)/\(apps.count)\(failed.isEmpty ? "" : "；失败：\(failed.joined(separator: "；"))")"
+            LogManager.shared.info(summary, source: "SigningViewModel")
+            endWork(message: summary)
+            Task { await refreshApps() }
+            return
+        }
+        let app = apps[index]
+        progressMessage = "批量重签 \(index+1)/\(apps.count)：\(app.displayName)"
+        markSigning(true, for: app.bundleIdentifier)
+        autoRevokeBeforeSigning { _ in
+            self.client.resign(bundleID: app.bundleIdentifier) { result in
+                self.markSigning(false, for: app.bundleIdentifier)
+                var ok = ok
+                var failed = failed
+                switch result {
+                case .success:
+                    ok += 1
+                    LogManager.shared.info("批量重签成功: \(app.bundleIdentifier)", source: "SigningViewModel")
+                case .failure(let e):
+                    failed.append("\(app.displayName)：\(e.localizedDescription)")
+                    LogManager.shared.error("批量重签失败 [\(app.displayName)]: \(e.localizedDescription)", source: "SigningViewModel")
+                }
+                self.resignOtherBatchNext(index: index + 1, apps: apps, ok: ok, failed: failed)
+            }
+        }
+    }
+
     func resignOtherApp(_ app: InstalledApp) {
         guard !app.isSigning else { return }
         guard beginWork("正在重签 \(app.displayName)…") else { return }

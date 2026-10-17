@@ -474,7 +474,7 @@ static NSString *RPVHelperResolveTool(NSString *name) {
 
     NSMutableArray<NSString *> *candidates = [NSMutableArray array];
     for (NSString *root in roots) {
-        for (NSString *sub in @[ @"usr/bin", @"bin", @"usr/sbin", @"sbin", @"usr/local/bin" ]) {
+        for (NSString *sub in @[ @"usr/bin", @"bin", @"usr/sbin", @"sbin", @"usr/local/bin", @"usr/libexec" ]) {
             NSString *p = [[root stringByAppendingPathComponent:sub]
                            stringByAppendingPathComponent:name];
             if (![candidates containsObject:p]) [candidates addObject:p];

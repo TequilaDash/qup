@@ -59,6 +59,8 @@ struct AppsView: View {
     @State private var pendingClearData: InstalledApp?
     /// 待重签的「其他应用」（用于弹出警告确认）
     @State private var pendingOtherAppResign: InstalledApp?
+    /// v2.2.17：批量重签其它应用的确认弹窗
+    @State private var showBatchResignConfirm = false
     /// 小黑屋说明弹窗
     @State private var showBlacklistHelp = false
 
@@ -190,6 +192,16 @@ struct AppsView: View {
                 if let app = pendingOtherAppResign {
                     Text("这将移除「\(app.displayName)」的当前证书，并使用你的 Apple ID 重新签发新证书。\n\n此操作可能导致该应用的保存设置和文件丢失。")
                 }
+            }
+            .confirmationDialog("批量重签其它应用",
+                                isPresented: $showBatchResignConfirm,
+                                titleVisibility: .visible) {
+                Button("重签 \(viewModel.otherApps.count) 个") {
+                    viewModel.resignOtherAppsBatch()
+                }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("将依次重签其它应用分区里的 \(viewModel.otherApps.count) 个应用。")
             }
             .confirmationDialog("检测到 App 扩展",
                                 isPresented: $viewModel.showExtensionChoice,
@@ -389,11 +401,8 @@ struct AppsView: View {
                         .font(.headline)
                     Spacer()
                     if !viewModel.otherApps.isEmpty {
-                        Button("签名") {
-                            // 批量重签所有其它应用（带警告）
-                            if let first = viewModel.otherApps.first {
-                                pendingOtherAppResign = first
-                            }
+                        Button("批量重签") {
+                            showBatchResignConfirm = true
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
