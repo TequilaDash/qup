@@ -254,40 +254,34 @@ struct AppsView: View {
     private var appList: some View {
         List {
             // Section 1: ReSign 签应用（本机 Apple ID 签名的应用）
+            // 🔴 v2.2.12：空状态从「Section 内条件行」挪到 footer——空态行↔数据行的条件切换
+            // 会触发 iOS 26 List 布局测量错位（栏目标题叠卡、行与空态并存，刷新后持续），
+            // 行内容改为无条件 ForEach 后不再切换。下两节同理。
             Section {
-                if viewModel.installedApps.isEmpty {
-                    Text("暂无本机签名的应用")
-                        .font(.callout)
-                        .foregroundColor(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .padding(.vertical, 12)
-                        .listRowBackground(Color.clear)
-                } else {
-                    ForEach(viewModel.installedApps) { app in
-                        AppRowView(app: app) {
-                            viewModel.resign(app: app)
+                ForEach(viewModel.installedApps) { app in
+                    AppRowView(app: app) {
+                        viewModel.resign(app: app)
+                    }
+                    .swipeActions(edge: .leading) {
+                        Button {
+                            viewModel.addToBlacklist(app, source: .installed)
+                        } label: {
+                            Label("加入小黑屋", systemImage: "nosign")
                         }
-                        .swipeActions(edge: .leading) {
-                            Button {
-                                viewModel.addToBlacklist(app, source: .installed)
-                            } label: {
-                                Label("加入小黑屋", systemImage: "nosign")
-                            }
-                            .tint(.orange)
+                        .tint(.orange)
+                    }
+                    .swipeActions(edge: .trailing) {
+                        Button(role: .destructive) {
+                            pendingUninstall = app
+                        } label: {
+                            Label("卸载", systemImage: "trash")
                         }
-                        .swipeActions(edge: .trailing) {
-                            Button(role: .destructive) {
-                                pendingUninstall = app
-                            } label: {
-                                Label("卸载", systemImage: "trash")
-                            }
-                            Button {
-                                pendingClearData = app
-                            } label: {
-                                Label("清空数据", systemImage: "eraser")
-                            }
-                            .tint(.purple)
+                        Button {
+                            pendingClearData = app
+                        } label: {
+                            Label("清空数据", systemImage: "eraser")
                         }
+                        .tint(.purple)
                     }
                 }
             } header: {
@@ -298,43 +292,43 @@ struct AppsView: View {
                 }
                 .padding(.vertical, 4)
                 .textCase(nil) // 保留原始大小写
+            } footer: {
+                if viewModel.installedApps.isEmpty {
+                    Text("暂无本机签名的应用")
+                        .font(.callout)
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.vertical, 4)
+                        .listRowBackground(Color.clear)
+                }
             }
 
             // Section 2: 其它应用（非当前 Apple ID 签名的应用，永远显示做预留）
             Section {
-                if viewModel.otherApps.isEmpty {
-                    Text("暂无其它应用")
-                        .font(.callout)
-                        .foregroundColor(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .padding(.vertical, 12)
-                        .listRowBackground(Color.clear)
-                } else {
-                    ForEach(viewModel.otherApps) { app in
-                        OtherAppRowView(app: app) {
-                            pendingOtherAppResign = app
+                ForEach(viewModel.otherApps) { app in
+                    OtherAppRowView(app: app) {
+                        pendingOtherAppResign = app
+                    }
+                    .swipeActions(edge: .leading) {
+                        Button {
+                            viewModel.addToBlacklist(app, source: .other)
+                        } label: {
+                            Label("加入小黑屋", systemImage: "nosign")
                         }
-                        .swipeActions(edge: .leading) {
-                            Button {
-                                viewModel.addToBlacklist(app, source: .other)
-                            } label: {
-                                Label("加入小黑屋", systemImage: "nosign")
-                            }
-                            .tint(.orange)
+                        .tint(.orange)
+                    }
+                    .swipeActions(edge: .trailing) {
+                        Button(role: .destructive) {
+                            pendingUninstall = app
+                        } label: {
+                            Label("卸载", systemImage: "trash")
                         }
-                        .swipeActions(edge: .trailing) {
-                            Button(role: .destructive) {
-                                pendingUninstall = app
-                            } label: {
-                                Label("卸载", systemImage: "trash")
-                            }
-                            Button {
-                                pendingClearData = app
-                            } label: {
-                                Label("清空数据", systemImage: "eraser")
-                            }
-                            .tint(.purple)
+                        Button {
+                            pendingClearData = app
+                        } label: {
+                            Label("清空数据", systemImage: "eraser")
                         }
+                        .tint(.purple)
                     }
                 }
             } header: {
@@ -343,7 +337,7 @@ struct AppsView: View {
                         .font(.headline)
                     Spacer()
                     if !viewModel.otherApps.isEmpty {
-                        Button("签名") {
+                        Button("重签") {
                             // 批量重签所有其它应用（带警告）
                             if let first = viewModel.otherApps.first {
                                 pendingOtherAppResign = first
@@ -356,43 +350,43 @@ struct AppsView: View {
                 }
                 .padding(.vertical, 4)
                 .textCase(nil)
+            } footer: {
+                if viewModel.otherApps.isEmpty {
+                    Text("暂无其它应用")
+                        .font(.callout)
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.vertical, 4)
+                        .listRowBackground(Color.clear)
+                }
             }
 
             // Section 3: 小黑屋（被拉黑的应用，自动续签/批量签名会跳过，但单点「重签」仍可）
             Section {
-                if viewModel.blacklistedApps.isEmpty {
-                    Text("小黑屋里还没有应用")
-                        .font(.callout)
-                        .foregroundColor(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .padding(.vertical, 12)
-                        .listRowBackground(Color.clear)
-                } else {
-                    ForEach(viewModel.blacklistedApps) { app in
-                        BlacklistRowView(app: app) {
-                            viewModel.resign(app: app)
+                ForEach(viewModel.blacklistedApps) { app in
+                    BlacklistRowView(app: app) {
+                        viewModel.resign(app: app)
+                    }
+                    .swipeActions(edge: .leading) {
+                        Button {
+                            viewModel.removeFromBlacklist(app)
+                        } label: {
+                            Label("移出小黑屋", systemImage: "checkmark.circle")
                         }
-                        .swipeActions(edge: .leading) {
-                            Button {
-                                viewModel.removeFromBlacklist(app)
-                            } label: {
-                                Label("移出小黑屋", systemImage: "checkmark.circle")
-                            }
-                            .tint(.blue)
+                        .tint(.blue)
+                    }
+                    .swipeActions(edge: .trailing) {
+                        Button(role: .destructive) {
+                            pendingUninstall = app
+                        } label: {
+                            Label("卸载", systemImage: "trash")
                         }
-                        .swipeActions(edge: .trailing) {
-                            Button(role: .destructive) {
-                                pendingUninstall = app
-                            } label: {
-                                Label("卸载", systemImage: "trash")
-                            }
-                            Button {
-                                pendingClearData = app
-                            } label: {
-                                Label("清空数据", systemImage: "eraser")
-                            }
-                            .tint(.purple)
+                        Button {
+                            pendingClearData = app
+                        } label: {
+                            Label("清空数据", systemImage: "eraser")
                         }
+                        .tint(.purple)
                     }
                 }
             } header: {
@@ -411,6 +405,15 @@ struct AppsView: View {
                 }
                 .padding(.vertical, 4)
                 .textCase(nil)
+            } footer: {
+                if viewModel.blacklistedApps.isEmpty {
+                    Text("小黑屋里还没有应用")
+                        .font(.callout)
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.vertical, 4)
+                        .listRowBackground(Color.clear)
+                }
             }
         }
         .refreshable {
@@ -439,6 +442,7 @@ struct AppsView: View {
             Text(viewModel.clearDataResultText ?? "")
         }
         .scrollContentBackground(.hidden) // 让 List 透出外层浅灰底
+        .listStyle(.insetGrouped) // 🔴 v2.2.12：显式固定样式，避免 iOS 26 默认样式漂移
         .alert("小黑屋", isPresented: $showBlacklistHelp) {
             Button("知道了", role: .cancel) {}
         } message: {
@@ -602,7 +606,7 @@ struct OtherAppRowView: View {
                 ProgressView()
                     .scaleEffect(0.7)
             } else {
-                Button("导入", action: onResign)  // 原版用"导入"按钮
+                Button("重签", action: onResign)  // v2.2.12：语义修正（该按钮触发重签确认流程）
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                     .disabled(false)
