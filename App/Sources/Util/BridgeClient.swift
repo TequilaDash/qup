@@ -160,7 +160,10 @@ final class BridgeClient: ObservableObject {
 
     /// 拉取「其他应用」——非当前 Apple ID 签名的已安装应用（含过期应用）
     func fetchOtherApps(completion: @escaping (Result<[InstalledApp], Error>) -> Void) {
-        bridge.fetchOtherApps { infos, error in
+        // 防御性 [weak self]：与 fetchInstalledApps 保持一致。
+        // 当前闭包虽未访问实例状态，但桥接层持有闭包期间若将来新增 self 访问，
+        // 统一弱引用写法可避免引入隐藏的强引用链。
+        bridge.fetchOtherApps { [weak self] infos, error in
             if let error = error {
                 completion(.failure(error))
                 return
