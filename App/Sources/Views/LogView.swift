@@ -178,6 +178,12 @@ struct LogView: View {
 
     // MARK: 筛选后的日志
     private var filteredLogs: [LogEntry] {
+        // 快速路径：无级别筛选且无搜索词时直接返回原始数组，
+        // 避免 body 每次重算都无条件 filter 出一份最多 5000 条的新数组。
+        if selectedFilter == nil && searchText.isEmpty {
+            return logManager.logs
+        }
+
         var logs = logManager.logs
 
         if let filter = selectedFilter {

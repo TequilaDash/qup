@@ -25,7 +25,13 @@ nonisolated enum BlacklistSource: String, Sendable {
 /// 应用图标解码缓存（InstalledApp 是 struct，无法在内部缓存可变状态；
 /// 用全局 NSCache 以 bundleID 为键缓存解码后的 UIImage，避免列表滚动时
 /// 每帧都 UIImage(data:) 重新解码同一份 PNG 数据导致卡顿）
-nonisolated(unsafe) private let iconCache = NSCache<NSString, UIImage>()
+/// 优化：设置 countLimit 上限——此前无任何上限，设备上旁加载应用较多或图标较大时
+/// 缓存只增不减，长期运行有内存压力风险。50 个图标（远超单屏可见行数）足够滚动复用。
+nonisolated(unsafe) private let iconCache: NSCache<NSString, UIImage> = {
+    let cache = NSCache<NSString, UIImage>()
+    cache.countLimit = 50
+    return cache
+}()
 
 nonisolated struct InstalledApp: Identifiable, Hashable, Sendable {
     let bundleIdentifier: String
