@@ -214,7 +214,7 @@ final class SigningViewModel: ObservableObject {
     }
 
     /// 重签一个「其他应用」（非当前 Apple ID 签名的应用）。
-    /// 与普通 resign 相同流程，但 autoRevoke 逻辑已在调用方处理。
+    /// 薄封装：转发到统一入口 resign(app:isOtherApp:)。
     // MARK: - 批量重签其它应用（v2.2.17）
 
     /// 串行链式重签其它应用分区的所有应用（每个完成后自动开始下一个）。
@@ -258,31 +258,7 @@ final class SigningViewModel: ObservableObject {
     }
 
     func resignOtherApp(_ app: InstalledApp) {
-        guard !app.isSigning else { return }
-        guard beginWork("正在重签 \(app.displayName)…") else { return }
-
-        markSigning(true, for: app.bundleIdentifier)
-        LogManager.shared.info("重签其他应用: \(app.bundleIdentifier)（原签名 TeamID: \(app.originalTeamID ?? "未知")）",
-                               source: "SigningViewModel")
-
-        autoRevokeBeforeSigning { _ in
-            self.client.resign(bundleID: app.bundleIdentifier) { result in
-                self.markSigning(false, for: app.bundleIdentifier)
-                switch result {
-                case .success:
-                    LogManager.shared.info("其他应用重签成功: \(app.bundleIdentifier)", source: "SigningViewModel")
-                    self.endWork(message: "签名完成")
-                case .failure(let error):
-                    LogManager.shared.error("其他应用重签失败 [\(app.bundleIdentifier)]: \(error.localizedDescription)",
-                                            source: "SigningViewModel")
-                    self.endWork(message: "签名失败", error: error)
-                }
-                Task {
-                    await self.refreshApps()
-                    await self.refreshOtherApps()
-                }
-            }
-        }
+        resign(app: app, isOtherApp: true)
     }
 
     // MARK: - 导入 IPA
@@ -431,26 +407,39 @@ final class SigningViewModel: ObservableObject {
         client.autoRevokeBeforeSigning(completion: completion)
     }
 
-    func resign(app: InstalledApp) {
+    /// 重签单个应用。统一入口：ReSign 签应用和「其他应用」共用同一套流程，
+    /// 仅日志措辞和刷新范围略有差异。
+    /// - Parameter isOtherApp: 是否为「其他应用」。true 时日志额外记录原签名
+    ///   TeamID，且成功后同时刷新两个列表。
+    func resign(app: InstalledApp, isOtherApp: Bool = false) {
         guard !app.isSigning else { return }
-        guard beginWork("正在签名 \(app.displayName)…") else { return }
+        guard beginWork(isOtherApp ? "正在重签 \(app.displayName)…" : "正在签名 \(app.displayName)…") else { return }
 
         markSigning(true, for: app.bundleIdentifier)
-        LogManager.shared.info("开始重签: \(app.bundleIdentifier)", source: "SigningViewModel")
+        if isOtherApp {
+            LogManager.shared.info("重签其他应用: \(app.bundleIdentifier)（原签名 TeamID: \(app.originalTeamID ?? "未知")）",
+                                   source: "SigningViewModel")
+        } else {
+            LogManager.shared.info("开始重签: \(app.bundleIdentifier)", source: "SigningViewModel")
+        }
 
         autoRevokeBeforeSigning { _ in
             self.client.resign(bundleID: app.bundleIdentifier) { result in
                 self.markSigning(false, for: app.bundleIdentifier)
                 switch result {
                 case .success:
-                    LogManager.shared.info("重签成功: \(app.bundleIdentifier)", source: "SigningViewModel")
+                    LogManager.shared.info(isOtherApp ? "其他应用重签成功: \(app.bundleIdentifier)" : "重签成功: \(app.bundleIdentifier)",
+                                           source: "SigningViewModel")
                     self.endWork(message: "签名完成")
                 case .failure(let error):
-                    LogManager.shared.error("重签失败 [\(app.bundleIdentifier)]: \(error.localizedDescription)",
+                    LogManager.shared.error("\(isOtherApp ? "其他应用重签失败" : "重签失败") [\(app.bundleIdentifier)]: \(error.localizedDescription)",
                                             source: "SigningViewModel")
                     self.endWork(message: "签名失败", error: error)
                 }
-                Task { await self.refreshApps() }
+                Task {
+                    await self.refreshApps()
+                    if isOtherApp { await self.refreshOtherApps() }
+                }
             }
         }
     }
