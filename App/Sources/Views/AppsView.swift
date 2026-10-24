@@ -7,6 +7,11 @@ import UniformTypeIdentifiers
 private final class IPAFilePicker: NSObject, UIDocumentPickerDelegate {
     private let onPick: ([URL]) -> Void
 
+    /// associated object 的 key：用静态变量地址替代字符串字面量。
+    /// 字符串字面量在不同编译单元/构建配置下地址可能不同，存在 key 不稳定、
+    /// 关联对象读取失败或与第三方 key 冲突的隐患；静态变量地址在进程内唯一且稳定。
+    private static var keeperKey: UInt8 = 0
+
     init(onPick: @escaping ([URL]) -> Void) { self.onPick = onPick }
 
     func present() {
@@ -33,7 +38,7 @@ private final class IPAFilePicker: NSObject, UIDocumentPickerDelegate {
         top.present(picker, animated: true)
 
         // 强引用自己，防止 delegate 回调前被释放
-        objc_setAssociatedObject(picker, "keeper", self, .OBJC_ASSOCIATION_RETAIN)
+        objc_setAssociatedObject(picker, &Self.keeperKey, self, .OBJC_ASSOCIATION_RETAIN)
     }
 
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
@@ -606,7 +611,9 @@ struct AppRowView: View {
                     .controlSize(.small)
             }
         }
+        .frame(minHeight: 64) // 固定行高，避免 List 单元格复用时的滚动鬼影/掉帧
         .padding(.vertical, 4)
+        .contentShape(Rectangle())
     }
 }
 
@@ -647,12 +654,13 @@ struct OtherAppRowView: View {
                 ProgressView()
                     .scaleEffect(0.7)
             } else {
-                Button("导入", action: onResign)  // 原版用"导入"按钮
+                // 文案修正：该按钮执行的是「重签」而非「导入」；同时移除 .disabled(false) 无效修饰
+                Button("签名", action: onResign)
                     .buttonStyle(.bordered)
                     .controlSize(.small)
-                    .disabled(false)
             }
         }
+        .frame(minHeight: 64) // 固定行高，与 AppRowView 一致
         .padding(.vertical, 4)   // 与 AppRowView 一致，去掉额外水平内边距，避免行内容被挤压
         .contentShape(Rectangle())
     }
@@ -697,8 +705,7 @@ struct BlacklistRowView: View {
             }
         }
         .frame(minHeight: 64) // 固定行高，避免 List 单元格复用时的滚动鬼影/掉帧
-        .padding(.vertical, 8)
-        .padding(.horizontal, 16)
+        .padding(.vertical, 4)  // 与 AppRowView/OtherAppRowView 统一（去掉多余的 vertical 8 + horizontal 16）
         .contentShape(Rectangle())
     }
 }
