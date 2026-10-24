@@ -220,33 +220,9 @@ final class SigningViewModel: ObservableObject {
     }
 
     /// 重签一个「其他应用」（非当前 Apple ID 签名的应用）。
-    /// 与普通 resign 相同流程，但 autoRevoke 逻辑已在调用方处理。
+    /// 薄封装：转发到统一入口 resign(app:isOtherApp:)。
     func resignOtherApp(_ app: InstalledApp) {
-        guard !app.isSigning else { return }
-        guard beginWork("正在重签 \(app.displayName)…") else { return }
-
-        markSigning(true, for: app.bundleIdentifier)
-        LogManager.shared.info("重签其他应用: \(app.bundleIdentifier)（原签名 TeamID: \(app.originalTeamID ?? "未知")）",
-                               source: "SigningViewModel")
-
-        autoRevokeBeforeSigning { _ in
-            self.client.resign(bundleID: app.bundleIdentifier) { result in
-                self.markSigning(false, for: app.bundleIdentifier)
-                switch result {
-                case .success:
-                    LogManager.shared.info("其他应用重签成功: \(app.bundleIdentifier)", source: "SigningViewModel")
-                    self.endWork(message: "签名完成")
-                case .failure(let error):
-                    LogManager.shared.error("其他应用重签失败 [\(app.bundleIdentifier)]: \(error.localizedDescription)",
-                                            source: "SigningViewModel")
-                    self.endWork(message: "签名失败", error: error)
-                }
-                Task {
-                    await self.refreshApps()
-                    await self.refreshOtherApps()
-                }
-            }
-        }
+        resign(app: app, isOtherApp: true)
     }
 
     // MARK: - 导入 IPA
@@ -319,26 +295,39 @@ final class SigningViewModel: ObservableObject {
         client.autoRevokeBeforeSigning(completion: completion)
     }
 
-    func resign(app: InstalledApp) {
+    /// 重签单个应用。统一入口：ReSign 签应用和「其他应用」共用同一套流程，
+    /// 仅日志措辞和刷新范围略有差异。
+    /// - Parameter isOtherApp: 是否为「其他应用」。true 时日志额外记录原签名
+    ///   TeamID，且成功后同时刷新两个列表。
+    func resign(app: InstalledApp, isOtherApp: Bool = false) {
         guard !app.isSigning else { return }
-        guard beginWork("正在签名 \(app.displayName)…") else { return }
+        guard beginWork(isOtherApp ? "正在重签 \(app.displayName)…" : "正在签名 \(app.displayName)…") else { return }
 
         markSigning(true, for: app.bundleIdentifier)
-        LogManager.shared.info("开始重签: \(app.bundleIdentifier)", source: "SigningViewModel")
+        if isOtherApp {
+            LogManager.shared.info("重签其他应用: \(app.bundleIdentifier)（原签名 TeamID: \(app.originalTeamID ?? "未知")）",
+                                   source: "SigningViewModel")
+        } else {
+            LogManager.shared.info("开始重签: \(app.bundleIdentifier)", source: "SigningViewModel")
+        }
 
         autoRevokeBeforeSigning { _ in
             self.client.resign(bundleID: app.bundleIdentifier) { result in
                 self.markSigning(false, for: app.bundleIdentifier)
                 switch result {
                 case .success:
-                    LogManager.shared.info("重签成功: \(app.bundleIdentifier)", source: "SigningViewModel")
+                    LogManager.shared.info(isOtherApp ? "其他应用重签成功: \(app.bundleIdentifier)" : "重签成功: \(app.bundleIdentifier)",
+                                           source: "SigningViewModel")
                     self.endWork(message: "签名完成")
                 case .failure(let error):
-                    LogManager.shared.error("重签失败 [\(app.bundleIdentifier)]: \(error.localizedDescription)",
+                    LogManager.shared.error("\(isOtherApp ? "其他应用重签失败" : "重签失败") [\(app.bundleIdentifier)]: \(error.localizedDescription)",
                                             source: "SigningViewModel")
                     self.endWork(message: "签名失败", error: error)
                 }
-                Task { await self.refreshApps() }
+                Task {
+                    await self.refreshApps()
+                    if isOtherApp { await self.refreshOtherApps() }
+                }
             }
         }
     }
@@ -385,6 +374,54 @@ final class SigningViewModel: ObservableObject {
                     self.endWork(message: "批量刷新失败", error: error)
                 }
                 Task { await self.refreshApps() }
+            }
+        }
+    }
+
+    // MARK: - 批量重签其它应用
+
+    /// 串行链式重签其它应用分区的所有应用（每个完成后自动开始下一个）。
+    /// 与桥接层「同一时间只跑一条签名流水线」的约定兼容：任一时刻只有一个
+    /// 应用正在签名。小黑屋中的应用不在 otherApps 分区里，天然被跳过。
+    /// （此前「其它应用」分区的批量按钮只对第一个应用弹确认框，是假批量。）
+    func resignOtherAppsBatch() {
+        guard !isBusy else { return }
+        let apps = otherApps
+        guard !apps.isEmpty else { return }
+        isBusy = true
+        lastError = nil
+        LogManager.shared.info("批量重签其它应用（共 \(apps.count) 个）", source: "SigningViewModel")
+        resignOtherBatchNext(index: 0, apps: apps, ok: 0, failed: [])
+    }
+
+    private func resignOtherBatchNext(index: Int, apps: [InstalledApp], ok: Int, failed: [String]) {
+        guard index < apps.count else {
+            let summary = "批量重签完成：成功 \(ok)/\(apps.count)\(failed.isEmpty ? "" : "；失败：\(failed.joined(separator: "；"))")"
+            LogManager.shared.info(summary, source: "SigningViewModel")
+            endWork(message: summary)
+            Task {
+                await refreshApps()
+                await refreshOtherApps()
+            }
+            return
+        }
+        let app = apps[index]
+        progressMessage = "批量重签 \(index + 1)/\(apps.count)：\(app.displayName)"
+        markSigning(true, for: app.bundleIdentifier)
+        autoRevokeBeforeSigning { _ in
+            self.client.resign(bundleID: app.bundleIdentifier) { result in
+                self.markSigning(false, for: app.bundleIdentifier)
+                var ok = ok
+                var failed = failed
+                switch result {
+                case .success:
+                    ok += 1
+                    LogManager.shared.info("批量重签成功: \(app.bundleIdentifier)", source: "SigningViewModel")
+                case .failure(let e):
+                    failed.append("\(app.displayName)：\(e.localizedDescription)")
+                    LogManager.shared.error("批量重签失败 [\(app.displayName)]: \(e.localizedDescription)", source: "SigningViewModel")
+                }
+                self.resignOtherBatchNext(index: index + 1, apps: apps, ok: ok, failed: failed)
             }
         }
     }

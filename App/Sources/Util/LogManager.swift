@@ -122,6 +122,20 @@ class LogManager: ObservableObject {
         NotificationCenter.default.addObserver(
             self, selector: #selector(handleDiagnostic(_:)),
             name: Notification.Name("cn.analy.resign.diagnostic"), object: nil)
+        startPeriodicSave()
+    }
+
+    // MARK: 定期持久化
+
+    /// 定期把内存日志落盘。此前 saveToDisk() 没有任何调用方——日志只在启动时
+    /// loadFromDisk 读入、之后永远只写内存数组，进程被 kill/崩溃时自上次启动
+    /// 以来的日志全部丢失。这里用 30s 定时器兜底；error 级日志在 append 里
+    /// 立即落盘（崩溃前尽量保留现场）。
+    /// Timer 挂在 initialize() 调用方的 RunLoop（主线程），触发后跳 MainActor 读写。
+    private func startPeriodicSave() {
+        Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.saveToDisk() }
+        }
     }
 
     /// 🔴 v1.1.186：把 signingd 的检测日志尾部导入日志页，让用户能看到
@@ -153,7 +167,7 @@ class LogManager: ObservableObject {
             "已注册信号处理",
             "内存看门狗已启动",
             "超时看门狗已启动",
-            "ℹ️ 无法自检 entitlement",
+            "ℹ\u{fe0f} 无法自检 entitlement",
             "namespace: ",
             "（若怀疑裸签",
             "配置: 自动",
@@ -230,8 +244,11 @@ class LogManager: ObservableObject {
 
         // 内存日志：跳主线程更新 UI（Task @MainActor 可捕获 MainActor 隔离的 self）
         Task { @MainActor [weak self] in
-            self?.logs.append(entry)
-            while (self?.logs.count ?? 0) > (self?.maxLogEntries ?? 50) { self?.logs.removeFirst() }
+            guard let self = self else { return }
+            self.logs.append(entry)
+            while self.logs.count > self.maxLogEntries { self.logs.removeFirst() }
+            // error 级立即落盘（崩溃前尽量保留现场）；普通级别由 30s 定时器兜底
+            if level == .error { self.saveToDisk() }
         }
         os_log("[%@][%@] %@", log: OSLog(subsystem: "cn.analy.resign", category: source),
                type: (level == .error ? .error : level == .warning ? .default : .info),
